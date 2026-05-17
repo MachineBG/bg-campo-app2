@@ -51,6 +51,7 @@ const TIPO_LBL = {corretiva:'Corretiva',preventiva:'Preventiva',inspecao:'Inspe�
 
 // ── STATE ─────────────────────────────────────────────────────
 const S = {
+  authToken: null,
   user: null,
   tab: 'home',
   // Data cache (atualizado do servidor)
@@ -211,7 +212,8 @@ async function executeQueuedAction(item) {
 // ── TRPC CLIENT ───────────────────────────────────────────────
 async function trpcQuery(procedure, input) {
   const url = `${TRPC}/${procedure}?input=${encodeURIComponent(JSON.stringify(input ?? {}))}`;
-  const res = await fetch(url, {credentials:'include'});
+  const headers = S.authToken ? {'Authorization': `Bearer ${S.authToken}`} : {};
+  const res = await fetch(url, {credentials:'include', headers});
   if (!res.ok) throw new Error(`${res.status}`);
   const json = await res.json();
   if (json.error) throw new Error(json.error.message || 'tRPC error');
@@ -219,9 +221,10 @@ async function trpcQuery(procedure, input) {
 }
 
 async function trpcMutation(procedure, input) {
+  const authHeaders = S.authToken ? {'Authorization': `Bearer ${S.authToken}`} : {};
   const res = await fetch(`${TRPC}/${procedure}`, {
     method:'POST', credentials:'include',
-    headers:{'Content-Type':'application/json'},
+    headers:{'Content-Type':'application/json', ...authHeaders},
     body: JSON.stringify({json: input})
   });
   if (!res.ok) throw new Error(`${res.status}`);
@@ -273,6 +276,7 @@ async function loadCachedData() {
   S.templates  = (await loadCache('templates')) || [];
   S.diaAtual   = (await loadCache('diaAtual'))  || null;
   S.historico  = (await loadCache('historico')) || [];
+  S.authToken  = (await loadCache('authToken')) || null;
 }
 
 // ── AUTH ──────────────────────────────────────────────────────
@@ -285,6 +289,10 @@ async function doLogin(email, senha) {
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || 'Credenciais inválidas');
   S.user = json;
+  if (json._token) {
+    S.authToken = json._token;
+    await saveCache('authToken', json._token);
+  }
   await saveCache('user', S.user);
   return json;
 }
@@ -292,7 +300,9 @@ async function doLogin(email, senha) {
 async function doLogout() {
   await fetch(ENDPOINTS.logout, {method:'POST', credentials:'include'}).catch(()=>{});
   S.user = null;
+  S.authToken = null;
   await saveCache('user', null);
+  await saveCache('authToken', null);
   render();
 }
 
@@ -993,7 +1003,8 @@ async function submitRelatorio(template, ordem, onBack) {
 
   try {
     if(S.isOnline) {
-      const res = await fetch(endpoint,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      const authH = S.authToken ? {'Authorization': `Bearer ${S.authToken}`} : {};
+      const res = await fetch(endpoint,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json',...authH},body:JSON.stringify(payload)});
       const json = await res.json();
       if(!res.ok||json.error) throw new Error(json.error||'Erro ao enviar');
     } else {
