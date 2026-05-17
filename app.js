@@ -258,28 +258,34 @@ async function loadServerData() {
       token: S.authToken ? S.authToken.slice(0,20)+'...' : 'NONE',
     };
 
-    if (ordens.status === 'fulfilled' && ordens.value?.items) {
-      S.ordens = ordens.value.items;
+    if (ordens.status === 'fulfilled') {
+      const ov = ordens.value;
+      const oarr = ov?.json?.items ?? ov?.items ?? ov?.json ?? ov;
+      S.ordens = Array.isArray(oarr) ? oarr : [];
       await saveCache('ordens', S.ordens);
     }
-    if (relatorios.status === 'fulfilled' && relatorios.value?.items) {
-      S.relatorios = relatorios.value.items;
+    if (relatorios.status === 'fulfilled') {
+      const rv = relatorios.value;
+      const rarr = rv?.json?.items ?? rv?.items ?? rv?.json ?? rv;
+      S.relatorios = Array.isArray(rarr) ? rarr : [];
       await saveCache('relatorios', S.relatorios);
     }
-    if (templates.status === 'fulfilled' && Array.isArray(templates.value)) {
-      S.templates = templates.value;
-      await saveCache('templates', S.templates);
-    } else if (templates.status === 'fulfilled' && templates.value) {
-      // Maybe it returns object directly
-      S.templates = Array.isArray(templates.value) ? templates.value : [];
+    if (templates.status === 'fulfilled') {
+      // tRPC v10 wraps in {json: ...}
+      const tv = templates.value;
+      const arr = tv?.json ?? tv;
+      S.templates = Array.isArray(arr) ? arr : [];
       await saveCache('templates', S.templates);
     }
     if (dia.status === 'fulfilled') {
-      S.diaAtual = dia.value;
+      const dv = dia.value;
+      S.diaAtual = dv?.json ?? dv;
       await saveCache('diaAtual', S.diaAtual);
     }
-    if (hist.status === 'fulfilled' && Array.isArray(hist.value)) {
-      S.historico = hist.value;
+    if (hist.status === 'fulfilled') {
+      const hv = hist.value;
+      const harr = hv?.json ?? hv;
+      S.historico = Array.isArray(harr) ? harr : [];
       await saveCache('historico', S.historico);
     }
   } catch(e) {
