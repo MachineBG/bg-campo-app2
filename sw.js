@@ -1,11 +1,21 @@
-// BG Campo - Service Worker v1
-const CACHE = 'bg-campo-v1';
-const ASSETS = ['/', '/index.html', '/app.js', '/manifest.json'];
+// BG Campo - Service Worker v2
+const CACHE = 'bg-campo-v2';
+const BASE = '/bg-campo-app2';
+const ASSETS = [
+  BASE + '/',
+  BASE + '/index.html',
+  BASE + '/app.js',
+  BASE + '/manifest.json',
+  BASE + '/icon-192.png',
+  BASE + '/icon-512.png',
+];
 
-// Cache-first para assets estáticos, network-first para API
 self.addEventListener('install', e => {
   e.waitUntil(
-    caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting())
+    caches.open(CACHE)
+      .then(c => c.addAll(ASSETS))
+      .catch(err => console.log('Cache partial fail (ok):', err))
+      .then(() => self.skipWaiting())
   );
 });
 
@@ -20,13 +30,13 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
 
-  // Nunca interceptar requests para a API (Railway) — precisa de credentials
+  // Never intercept API calls — needs credentials
   if (url.origin !== location.origin) return;
 
-  // Nunca interceptar POST/PUT/DELETE
+  // Never intercept POST/PUT/DELETE
   if (e.request.method !== 'GET') return;
 
-  // Cache-first para assets estáticos
+  // Cache-first for static assets
   e.respondWith(
     caches.match(e.request).then(cached => {
       const network = fetch(e.request).then(res => {
