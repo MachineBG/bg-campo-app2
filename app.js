@@ -230,9 +230,12 @@ async function trpcMutation(procedure, input) {
     headers:{'Content-Type':'application/json', ...authHeaders},
     body: JSON.stringify({json: input})
   });
-  if (!res.ok) throw new Error(`${res.status}`);
-  const json = await res.json();
-  if (json.error) throw new Error(json.error.message || 'tRPC error');
+  const json = await res.json().catch(()=>({error:{message:'Resposta inválida'}}));
+  if (!res.ok) {
+    const msg = json?.error?.message || json?.error?.json?.message || `Erro ${res.status}`;
+    throw new Error(msg);
+  }
+  if (json.error) throw new Error(json.error.message || json.error.json?.message || 'tRPC error');
   const data = json.result?.data;
   if (data && typeof data === 'object' && 'json' in data) return data.json;
   return data;
@@ -828,12 +831,38 @@ function buildRelForm(template, ordem, onBack) {
         });
       } else if (campo.tipo === 'select') {
         const opts = campo.opcoes||['RUIM','REGULAR','BOM','NA'];
+        const needsDetail = opts.some(o=>['RUIM','REGULAR'].includes(o)); // show detail for quality selects
+        const fid2='fs'+campo.id.replace(/[^a-z0-9]/gi,'');
         w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label>
           <select class="sel" data-cid="${campo.id}">
             <option value="">Selecione...</option>
             ${opts.map(op=>`<option value="${op}" ${S.relDados[campo.id]===op?'selected':''}>${op}</option>`).join('')}
-          </select></div>`;
-        w.querySelector('select').addEventListener('change',e=>{S.relDados[campo.id]=e.target.value;});
+          </select>
+          <div id="${fid2}-extra" style="display:${S.relDados[campo.id]&&S.relDados[campo.id]!=='BOM'&&S.relDados[campo.id]!=='NA'?'flex':'none'};flex-direction:column;gap:6px;margin-top:6px">
+            <input class="inp" id="${fid2}-desc" placeholder="Descrever problema..." value="${S.relDados[campo.id+'_obs']||''}">
+            <label style="display:flex;align-items:center;gap:8px;background:var(--bg-card);border:1px dashed var(--border);border-radius:var(--rs);padding:10px 12px;cursor:pointer;font-size:13px;color:var(--text-2)">
+              ${IC.camera} Foto do problema
+              <input type="file" accept="image/*" capture="environment" style="display:none" id="${fid2}-foto">
+            </label>
+            <div id="${fid2}-fprev"></div>
+          </div>
+        </div>`;
+        const sel = w.querySelector('select');
+        const extra = w.querySelector('#'+fid2+'-extra');
+        sel.addEventListener('change',e=>{
+          S.relDados[campo.id]=e.target.value;
+          const bad = e.target.value && e.target.value!=='BOM' && e.target.value!=='NA';
+          if(extra) extra.style.display=bad?'flex':'none';
+        });
+        w.querySelector('#'+fid2+'-desc')?.addEventListener('input',e=>{S.relDados[campo.id+'_obs']=e.target.value;});
+        w.querySelector('#'+fid2+'-foto')?.addEventListener('change',e=>{
+          const file=e.target.files[0]; if(!file) return;
+          const r=new FileReader(); r.onload=ev=>{
+            S.relDados[campo.id+'_foto']=ev.target.result;
+            const p=w.querySelector('#'+fid2+'-fprev');
+            if(p) p.innerHTML=`<img src="${ev.target.result}" style="width:100%;border-radius:var(--rs);max-height:150px;object-fit:cover">`;
+          }; r.readAsDataURL(file);
+        });
       } else if (campo.tipo === 'data') {
         w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label>
           <input class="inp" type="datetime-local" data-cid="${campo.id}" value="${S.relDados[campo.id]||''}"></div>`;
@@ -967,12 +996,20 @@ function buildAssinaturas() {
     <div class="sec-ttl" style="margin-bottom:12px">${IC.pen} Assinaturas</div>
     <div class="fg" style="margin-bottom:14px">
       <div class="flex jb aic" style="margin-bottom:6px">
+        <label class="lbl">Nome do Cliente</label>
+      </div>
+      <input id="sig-cli-nome" class="inp" placeholder="Nome completo do cliente" style="margin-bottom:8px">
+      <div class="flex jb aic" style="margin-bottom:6px">
         <label class="lbl">Assinatura do Cliente</label>
         <button class="btn btn-gh btn-sm" style="width:auto;padding:0 10px;height:28px;font-size:12px" id="clr-cli">Limpar</button>
       </div>
       <canvas id="sig-cli" class="sig-c"></canvas>
     </div>
     <div class="fg">
+      <div class="flex jb aic" style="margin-bottom:6px">
+        <label class="lbl">Nome do Técnico</label>
+      </div>
+      <input id="sig-tec-nome" class="inp" value="${S.user?.nome||''}" placeholder="Nome do técnico" style="margin-bottom:8px">
       <div class="flex jb aic" style="margin-bottom:6px">
         <label class="lbl">Assinatura do Técnico</label>
         <button class="btn btn-gh btn-sm" style="width:auto;padding:0 10px;height:28px;font-size:12px" id="clr-tec">Limpar</button>
@@ -984,6 +1021,9 @@ function buildAssinaturas() {
     initSig('sig-tec','tec');
     wrap.querySelector('#clr-cli').addEventListener('click',()=>clearSig('sig-cli','cli'));
     wrap.querySelector('#clr-tec').addEventListener('click',()=>clearSig('sig-tec','tec'));
+    // Save names to relDados
+    wrap.querySelector('#sig-cli-nome').addEventListener('input',e=>{ S.relDados['_nomeCliente']=e.target.value; });
+    wrap.querySelector('#sig-tec-nome').addEventListener('input',e=>{ S.relDados['_nomeTecnico']=e.target.value; });
   },50);
   return wrap;
 }
@@ -1062,9 +1102,15 @@ async function submitRelatorio(template, ordem, onBack) {
     fotos: null,
   };
   if(ordem) payload.ordemId = ordem.id;
-  if(!ordem && template) payload.templateId = template.id;
-  if(S.relSigCli&&S.relSigCli.length>500) payload.assinaturaCliente=S.relSigCli;
-  if(S.relSigTec&&S.relSigTec.length>500) payload.assinaturaTecnico=S.relSigTec;
+  if(!ordem && template) payload.templateId = Number(template.id);
+  // Add names to dados
+  if(S.relDados['_nomeCliente']) { payload.dados = payload.dados||{}; payload.dados['_nomeCliente']=S.relDados['_nomeCliente']; }
+  if(S.relDados['_nomeTecnico']) { payload.dados = payload.dados||{}; payload.dados['_nomeTecnico']=S.relDados['_nomeTecnico']; }
+  // Signatures — only send if canvas has content
+  const sigCliData = document.getElementById('sig-cli')?.toDataURL();
+  const sigTecData = document.getElementById('sig-tec')?.toDataURL();
+  if(sigCliData && sigCliData.length>1000) payload.assinaturaCliente=sigCliData;
+  if(sigTecData && sigTecData.length>1000) payload.assinaturaTecnico=sigTecData;
 
   const btn = document.querySelector('.btn-gr:last-of-type');
   if(btn){btn.disabled=true;btn.innerHTML=`${IC.send} Enviando...`;}
@@ -1075,6 +1121,8 @@ async function submitRelatorio(template, ordem, onBack) {
       if(ordem) {
         await trpcMutation('campo.mobile.submitRelatorio', payload);
       } else {
+        // submitRelatorioDireto requires templateId as number
+        if(!payload.templateId) throw new Error('Template não identificado');
         await trpcMutation('campo.mobile.submitRelatorioDireto', payload);
       }
     } else {
