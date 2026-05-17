@@ -1032,81 +1032,66 @@ async function submitRelatorio(template, ordem, onBack) {
   const clienteNome = ordem ? ordem.clienteNome : (document.getElementById('rel-cli')?.value||'').trim();
   const obs = document.getElementById('rel-obs')?.value||'';
   if(!clienteNome){alert('Preencha o nome do cliente');return;}
+  if(!ordem && !template?.id){alert('Template não selecionado');return;}
+
+  // Sanitize dados — never send base64 images inline
+  const dadosSan = {};
+  Object.entries(S.relDados).forEach(([k,v])=>{
+    if(v===null||v===undefined||v==='') return;
+    if(typeof v==='string'&&v.startsWith('data:')) return;
+    dadosSan[k]=typeof v==='boolean'?(v?'true':'false'):String(v);
+  });
 
   const svsOk = S.relServicos.filter(s=>s.descricao.trim());
   const pcsOk = S.relPecas.filter(p=>p.nome.trim());
 
-  // Sanitizar dados dos campos do template
-  const dadosSan = {};
-  Object.entries(S.relDados).forEach(([k,v])=>{
-    if(v===null||v===undefined||v==='') return;
-    if(typeof v==='string'&&v.startsWith('data:')) return; // nunca base64
-    dadosSan[k]=typeof v==='boolean'?(v?'true':'false'):String(v);
-  });
+  // Map tipo to valid backend enum
+  const tipoMap = {corretiva:'corretiva',preventiva:'preventiva',inspecao:'inspecao',
+    checklist_entrada:'checklist_entrada',checklist_saida:'checklist_saida',
+    instalacao:'instalacao',garantia:'garantia',checklist:'corretiva',
+    formulario:'corretiva',os:'corretiva',entrada_saida:'checklist_saida'};
+  const tipoFinal = tipoMap[ordem?.tipo||template?.tipo||'corretiva']||'corretiva';
 
   const payload = {
     clienteNome,
-    tipo: ordem?.tipo||template?.tipo||'corretiva',
-    observacoes: obs||undefined,
-    dados: Object.keys(dadosSan).length?dadosSan:undefined,
-    servicosRealizados: svsOk.length?svsOk.map(s=>({descricao:s.descricao,concluido:!!s.concluido})):undefined,
-    pecasUtilizadas: pcsOk.length?pcsOk:undefined,
-    // fotos: base64 — em produção, fazer upload separado
+    tipo: tipoFinal,
+    observacoes: obs||null,
+    dados: Object.keys(dadosSan).length?dadosSan:null,
+    servicosRealizados: svsOk.length?svsOk.map(s=>({descricao:s.descricao,concluido:!!s.concluido})):null,
+    pecasUtilizadas: pcsOk.length?pcsOk.map(p=>({nome:p.nome,codigo:p.codigo||null,quantidade:p.quantidade||1})):null,
+    fotos: null,
   };
-  if(S.relSigCli&&!S.relSigCli.startsWith('data:')) payload.assinaturaCliente=S.relSigCli;
-  if(S.relSigTec&&!S.relSigTec.startsWith('data:')) payload.assinaturaTecnico=S.relSigTec;
-
-  const endpoint = ordem ? ENDPOINTS.submitRelatorio : ENDPOINTS.submitRelatorioDireto;
   if(ordem) payload.ordemId = ordem.id;
-  else if(template) payload.templateId = template.id;
+  if(!ordem && template) payload.templateId = template.id;
+  if(S.relSigCli&&S.relSigCli.length>500) payload.assinaturaCliente=S.relSigCli;
+  if(S.relSigTec&&S.relSigTec.length>500) payload.assinaturaTecnico=S.relSigTec;
 
-  const btn = document.querySelector('#rel-submit')||document.querySelector('.btn-gr:last-child');
+  const btn = document.querySelector('.btn-gr:last-of-type');
   if(btn){btn.disabled=true;btn.innerHTML=`${IC.send} Enviando...`;}
 
   try {
     if(S.isOnline) {
-      const authH = S.authToken ? {'Authorization': `Bearer ${S.authToken}`} : {};
-      // For direct reports, use tRPC mutation instead of REST endpoint
-      let res, json2;
-      if(!ordem) {
-        // submitRelatorioDireto via tRPC
-        try {
-          const result = await trpcMutation('campo.mobile.submitRelatorioDireto', payload);
-          json2 = {ok: true, result};
-          res = {ok: true};
-        } catch(err) {
-          throw new Error(err.message || 'Erro ao enviar');
-        }
+      // Always use tRPC mutations with Bearer token — avoids cookie issues on iOS
+      if(ordem) {
+        await trpcMutation('campo.mobile.submitRelatorio', payload);
       } else {
-        res = await fetch(endpoint,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json',...authH},body:JSON.stringify(payload)});
-        json2 = await res.json();
+        await trpcMutation('campo.mobile.submitRelatorioDireto', payload);
       }
-      if(res && !res.ok && json2?.error) throw new Error(json2.error||'Erro ao enviar');
-      // skip the original res/json check below
-      const _skipOriginalCheck = true;
-      const json = await res.json();
-      if(!_skipOriginalCheck && (!res.ok||json?.error)) throw new Error(json?.error||'Erro ao enviar');
     } else {
-      const action = ordem?'submitRelatorio':'submitRelatorioDireto';
-      await queueAction(action, payload);
+      await queueAction(ordem?'submitRelatorio':'submitRelatorioDireto', payload);
     }
 
-    // Update local state
     if(ordem){const o=S.ordens.find(x=>x.id===ordem.id);if(o)o.status='concluida';}
-
     S.showNovoRelatorio=false; S.activeRelatorioOsId=null; S.selectedOrdemId=null;
     S.tab='relatorios';
     resetRelForm();
-
-    // Reload
     if(S.isOnline) await loadServerData();
     else await saveCache('ordens',S.ordens);
-
     render();
-    showSuccess(S.isOnline?'Relatório enviado!':'Salvo offline — será sincronizado', S.isOnline?'Os dados foram salvos no CRM.':'Quando voltar a internet, sincronize.');
+    showSuccess(S.isOnline?'Relatório enviado!':'Salvo offline — será sincronizado', S.isOnline?'Dados salvos no CRM.':'Será sincronizado quando voltar a internet.');
   } catch(e) {
     if(btn){btn.disabled=false;btn.innerHTML=`${IC.send} Enviar Relatório`;}
-    alert('Erro: '+e.message);
+    alert('Erro ao enviar: '+e.message);
   }
 }
 
