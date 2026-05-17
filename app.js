@@ -1336,9 +1336,9 @@ async function boot() {
     processQueue();
   }
 
-  // Service Worker
+  // Service Worker — desabilitado para evitar cache problems
   if('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(()=>{});
+    navigator.serviceWorker.getRegistrations().then(r=>r.forEach(s=>s.unregister()));
   }
 }
 
