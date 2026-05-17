@@ -211,13 +211,16 @@ async function executeQueuedAction(item) {
 
 // ── TRPC CLIENT ───────────────────────────────────────────────
 async function trpcQuery(procedure, input) {
-  const url = `${TRPC}/${procedure}?input=${encodeURIComponent(JSON.stringify(input ?? {}))}`;
+  const url = `${TRPC}/${procedure}?input=${encodeURIComponent(JSON.stringify({json: input ?? {}}))}`;
   const headers = S.authToken ? {'Authorization': `Bearer ${S.authToken}`} : {};
   const res = await fetch(url, {credentials:'include', headers});
   if (!res.ok) throw new Error(`${res.status}`);
   const json = await res.json();
   if (json.error) throw new Error(json.error.message || 'tRPC error');
-  return json.result?.data;
+  // tRPC v10 returns {result: {data: {json: ...}}} or {result: {data: ...}}
+  const data = json.result?.data;
+  if (data && typeof data === 'object' && 'json' in data) return data.json;
+  return data;
 }
 
 async function trpcMutation(procedure, input) {
@@ -230,7 +233,9 @@ async function trpcMutation(procedure, input) {
   if (!res.ok) throw new Error(`${res.status}`);
   const json = await res.json();
   if (json.error) throw new Error(json.error.message || 'tRPC error');
-  return json.result?.data;
+  const data = json.result?.data;
+  if (data && typeof data === 'object' && 'json' in data) return data.json;
+  return data;
 }
 
 // ── SERVER DATA LOADER ────────────────────────────────────────
