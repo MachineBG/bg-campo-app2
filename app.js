@@ -245,6 +245,14 @@ async function loadServerData() {
       trpcQuery('campo.visitaComercial.historico', {}),
     ]);
 
+    // Debug — store last results for diagnosis
+    S._debug = {
+      ordens: ordens.status === 'rejected' ? ordens.reason?.message : ordens.value,
+      relatorios: relatorios.status === 'rejected' ? relatorios.reason?.message : relatorios.value,
+      templates: templates.status === 'rejected' ? templates.reason?.message : templates.value,
+      token: S.authToken ? S.authToken.slice(0,20)+'...' : 'NONE',
+    };
+
     if (ordens.status === 'fulfilled' && ordens.value?.items) {
       S.ordens = ordens.value.items;
       await saveCache('ordens', S.ordens);
@@ -255,6 +263,10 @@ async function loadServerData() {
     }
     if (templates.status === 'fulfilled' && Array.isArray(templates.value)) {
       S.templates = templates.value;
+      await saveCache('templates', S.templates);
+    } else if (templates.status === 'fulfilled' && templates.value) {
+      // Maybe it returns object directly
+      S.templates = Array.isArray(templates.value) ? templates.value : [];
       await saveCache('templates', S.templates);
     }
     if (dia.status === 'fulfilled') {
@@ -267,6 +279,7 @@ async function loadServerData() {
     }
   } catch(e) {
     console.error('loadServerData error:', e);
+    S._debug = {error: e.message};
   }
 }
 
@@ -1255,9 +1268,24 @@ function renderPerfil() {
     </div>`:''}
 
     <button class="btn btn-gh" id="btn-refresh">${IC.sync} Atualizar Dados</button>
+    <button class="btn btn-gh" id="btn-debug" style="font-size:12px">🔍 Ver Diagnóstico</button>
+    <div id="debug-box" style="display:none;background:rgba(0,0,0,0.5);border:1px solid #333;border-radius:10px;padding:12px;font-family:monospace;font-size:11px;word-break:break-all;color:#0f0;margin-top:8px;white-space:pre-wrap"></div>
     <button class="btn btn-dn" id="btn-logout">${IC.logout} Sair</button>
   `;
   el.querySelector('#btn-logout').addEventListener('click',doLogout);
+  el.querySelector('#btn-debug').addEventListener('click',()=>{
+    const box = el.querySelector('#debug-box');
+    box.style.display = box.style.display==='none'?'block':'none';
+    box.textContent = JSON.stringify({
+      user: S.user?.email,
+      token: S.authToken ? S.authToken.slice(0,30)+'...' : 'SEM TOKEN',
+      ordens: S.ordens.length,
+      templates: S.templates.length,
+      queue: S.syncQueue.length,
+      online: S.isOnline,
+      debug: S._debug,
+    }, null, 2);
+  });
   el.querySelector('#btn-refresh').addEventListener('click',async()=>{
     if(!S.isOnline){alert('Sem conexão');return;}
     el.querySelector('#btn-refresh').disabled=true;
