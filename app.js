@@ -612,8 +612,8 @@ function renderOrdemDetail() {
   wrap.style.cssText='display:flex;flex-direction:column;height:100%;background:var(--bg-base)';
 
   const hdr = div('hdr');
-  hdr.innerHTML=`<button class="hdr-back">${IC.back}</button><h1 class="hdr-title">OS #${ordem.numero||ordem.id}</h1><span class="badge ${STATUS_BADGE[ordem.status]||'b-gray'}">${STATUS_LBL[ordem.status]||ordem.status}</span>`;
-  hdr.querySelector('.hdr-back').addEventListener('click',()=>{S.selectedOrdemId=null;render();});
+  hdr.innerHTML=`<button class="hdr-back" id="os-back-btn">${IC.back}</button><h1 class="hdr-title">OS #${ordem.numero||ordem.id}</h1><span class="badge ${STATUS_BADGE[ordem.status]||'b-gray'}">${STATUS_LBL[ordem.status]||ordem.status}</span>`;
+  hdr.querySelector('#os-back-btn').addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); S.selectedOrdemId=null; render(); });
 
   const content = div('content full pad sp4 fi');
   content.style.flex='1';
@@ -729,8 +729,8 @@ function renderNovoRelatorio() {
       S.showNovoRelatorio=false; S.activeRelatorioOsId=null; resetRelForm(); render();
     }
   };
-  hdr.innerHTML=`<button class="hdr-back">${IC.back}</button><h1 class="hdr-title">${ordem?`OS #${ordem.numero||ordem.id}`:'Novo Relatório'}</h1>`;
-  hdr.querySelector('.hdr-back').addEventListener('click',goBack);
+  hdr.innerHTML=`<button class="hdr-back" id="rel-back-btn">${IC.back}</button><h1 class="hdr-title">${ordem?`OS #${ordem.numero||ordem.id}`:'Novo Relatório'}</h1>`;
+  hdr.querySelector('#rel-back-btn').addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); goBack(); });
 
   const content = div('content full pad fi');
   content.style.flex='1';
@@ -809,8 +809,42 @@ function buildRelForm(template, ordem, onBack) {
       } else if(campo.tipo==='gps') {
         w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label>${S.relDados[campo.id]?`<div class="gps-tag">${IC.pin} ${S.relDados[campo.id]}</div>`:`<button class="btn btn-gh btn-sm mt2" data-gps="${campo.id}">${IC.pin} Capturar GPS</button>`}</div>`;
         w.querySelector('[data-gps]')?.addEventListener('click',()=>captureGPS(campo.id));
+      } else if (campo.tipo === 'foto') {
+        const fid = 'f'+campo.id.replace(/[^a-z0-9]/gi,'');
+        w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label>
+          <label style="display:flex;align-items:center;gap:8px;background:var(--bg-card);border:1px dashed var(--border);border-radius:var(--rs);padding:12px 14px;cursor:pointer">
+            ${IC.camera} <span style="font-size:14px;color:var(--text-2)">Tirar foto</span>
+            <input type="file" accept="image/*" capture="environment" style="display:none" id="${fid}">
+          </label>
+          <div id="${fid}p"></div>
+        </div>`;
+        w.querySelector('input').addEventListener('change',e=>{
+          const file=e.target.files[0]; if(!file) return;
+          const r=new FileReader(); r.onload=ev=>{
+            S.relDados[campo.id]=ev.target.result;
+            const p=document.getElementById(fid+'p');
+            if(p) p.innerHTML=`<img src="${ev.target.result}" style="width:100%;border-radius:var(--rs);margin-top:6px;max-height:180px;object-fit:cover">`;
+          }; r.readAsDataURL(file);
+        });
+      } else if (campo.tipo === 'select') {
+        const opts = campo.opcoes||['RUIM','REGULAR','BOM','NA'];
+        w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label>
+          <select class="sel" data-cid="${campo.id}">
+            <option value="">Selecione...</option>
+            ${opts.map(op=>`<option value="${op}" ${S.relDados[campo.id]===op?'selected':''}>${op}</option>`).join('')}
+          </select></div>`;
+        w.querySelector('select').addEventListener('change',e=>{S.relDados[campo.id]=e.target.value;});
+      } else if (campo.tipo === 'data') {
+        w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label>
+          <input class="inp" type="datetime-local" data-cid="${campo.id}" value="${S.relDados[campo.id]||''}"></div>`;
+        w.querySelector('input').addEventListener('change',e=>{S.relDados[campo.id]=e.target.value;});
+      } else if (campo.tipo === 'horimetro' || campo.tipo === 'numero') {
+        w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label>
+          <input class="inp" type="number" inputmode="decimal" data-cid="${campo.id}" placeholder="${campo.placeholder||campo.label}" value="${S.relDados[campo.id]||''}"></div>`;
+        w.querySelector('input').addEventListener('change',e=>{S.relDados[campo.id]=e.target.value;});
       } else {
-        w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label><input class="inp" type="${campo.tipo==='horimetro'||campo.tipo==='numero'?'number':'text'}" data-cid="${campo.id}" placeholder="${campo.placeholder||campo.label}" value="${S.relDados[campo.id]||''}"></div>`;
+        w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label>
+          <input class="inp" type="text" data-cid="${campo.id}" placeholder="${campo.placeholder||campo.label}" value="${S.relDados[campo.id]||''}"></div>`;
         w.querySelector('input').addEventListener('change',e=>{S.relDados[campo.id]=e.target.value;});
       }
       frag.appendChild(w);
@@ -967,11 +1001,15 @@ function initSig(id, type) {
   const end=()=>{drawing=false;if(type==='cli')S.relSigCli=canvas.toDataURL();else S.relSigTec=canvas.toDataURL()};
   canvas.addEventListener('touchstart',start,{passive:false});
   canvas.addEventListener('touchmove',move,{passive:false});
-  canvas.addEventListener('touchend',end);
+  canvas.addEventListener('touchend',end,{passive:false});
   canvas.addEventListener('mousedown',start);
   canvas.addEventListener('mousemove',move);
   canvas.addEventListener('mouseup',end);
   canvas.addEventListener('mouseleave',end);
+  // iOS pointer events fallback
+  canvas.addEventListener('pointerdown',start,{passive:false});
+  canvas.addEventListener('pointermove',move,{passive:false});
+  canvas.addEventListener('pointerup',end);
 }
 
 function clearSig(id,type) {
@@ -1028,9 +1066,26 @@ async function submitRelatorio(template, ordem, onBack) {
   try {
     if(S.isOnline) {
       const authH = S.authToken ? {'Authorization': `Bearer ${S.authToken}`} : {};
-      const res = await fetch(endpoint,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json',...authH},body:JSON.stringify(payload)});
+      // For direct reports, use tRPC mutation instead of REST endpoint
+      let res, json2;
+      if(!ordem) {
+        // submitRelatorioDireto via tRPC
+        try {
+          const result = await trpcMutation('campo.mobile.submitRelatorioDireto', payload);
+          json2 = {ok: true, result};
+          res = {ok: true};
+        } catch(err) {
+          throw new Error(err.message || 'Erro ao enviar');
+        }
+      } else {
+        res = await fetch(endpoint,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json',...authH},body:JSON.stringify(payload)});
+        json2 = await res.json();
+      }
+      if(res && !res.ok && json2?.error) throw new Error(json2.error||'Erro ao enviar');
+      // skip the original res/json check below
+      const _skipOriginalCheck = true;
       const json = await res.json();
-      if(!res.ok||json.error) throw new Error(json.error||'Erro ao enviar');
+      if(!_skipOriginalCheck && (!res.ok||json?.error)) throw new Error(json?.error||'Erro ao enviar');
     } else {
       const action = ordem?'submitRelatorio':'submitRelatorioDireto';
       await queueAction(action, payload);
