@@ -1074,11 +1074,14 @@ async function submitRelatorio(template, ordem, onBack) {
   if(!clienteNome){alert('Preencha o nome do cliente');return;}
   if(!ordem && !template?.id){alert('Template não selecionado');return;}
 
-  // Sanitize dados — never send base64 images inline
+  // Sanitize dados — only send valid strings, no base64, no internal keys
   const dadosSan = {};
   Object.entries(S.relDados).forEach(([k,v])=>{
+    if(k.startsWith('_')) return;  // skip internal keys like _nomeCliente
+    if(k.endsWith('_foto')) return; // skip foto keys (base64)
     if(v===null||v===undefined||v==='') return;
-    if(typeof v==='string'&&v.startsWith('data:')) return;
+    if(typeof v==='string'&&v.startsWith('data:')) return; // no base64
+    if(typeof v==='object') return; // no objects
     dadosSan[k]=typeof v==='boolean'?(v?'true':'false'):String(v);
   });
 
@@ -1103,9 +1106,13 @@ async function submitRelatorio(template, ordem, onBack) {
   };
   if(ordem) payload.ordemId = ordem.id;
   if(!ordem && template) payload.templateId = Number(template.id);
-  // Add names to dados
-  if(S.relDados['_nomeCliente']) { payload.dados = payload.dados||{}; payload.dados['_nomeCliente']=S.relDados['_nomeCliente']; }
-  if(S.relDados['_nomeTecnico']) { payload.dados = payload.dados||{}; payload.dados['_nomeTecnico']=S.relDados['_nomeTecnico']; }
+  // Add names to observacoes
+  const nomeCliente = document.getElementById('sig-cli-nome')?.value||S.relDados['_nomeCliente']||'';
+  const nomeTecnico = document.getElementById('sig-tec-nome')?.value||S.relDados['_nomeTecnico']||S.user?.nome||'';
+  if(nomeCliente||nomeTecnico) {
+    const obsExtra = [payload.observacoes||'', nomeCliente?`Cliente: ${nomeCliente}`:'', nomeTecnico?`Técnico: ${nomeTecnico}`:''].filter(Boolean).join(' | ');
+    payload.observacoes = obsExtra||null;
+  }
   // Signatures — only send if canvas has content
   const sigCliData = document.getElementById('sig-cli')?.toDataURL();
   const sigTecData = document.getElementById('sig-tec')?.toDataURL();
