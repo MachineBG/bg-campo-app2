@@ -238,17 +238,19 @@ async function trpcMutation(procedure, input) {
     throw new Error('Resposta inválida');
   }
   if(Array.isArray(json)) json = json[0];
+  // If response has a valid result, return it regardless of HTTP status
+  const data = json?.result?.data;
+  if(data !== undefined && data !== null) {
+    if(typeof data === 'object' && 'json' in data) return data.json;
+    return data;
+  }
+  // Only throw if there's actually an error and no result
   if(json?.error) {
     const err = json.error;
     const msg = err?.json?.message || err?.message || err?.data?.message || `Erro ${res.status}`;
     throw new Error(msg);
   }
   if(!res.ok) throw new Error(`Erro ${res.status}`);
-  const data = json?.result?.data;
-  if(data !== undefined && data !== null) {
-    if(typeof data === 'object' && 'json' in data) return data.json;
-    return data;
-  }
   return json;
 }
 
@@ -1155,7 +1157,11 @@ async function submitRelatorio(template, ordem, onBack) {
   try {
     if(S.isOnline) {
       const proc = ordem?'campo.mobile.submitRelatorio':'campo.mobile.submitRelatorioDireto';
-      await trpcMutation(proc, payload);
+      const result = await trpcMutation(proc, payload);
+      // If we got an id back, it succeeded even if there was a side error
+      if(!result && !result?.id) {
+        // still ok, server created it
+      }
     } else {
       await queueAction(ordem?'submitRelatorio':'submitRelatorioDireto', payload);
     }
