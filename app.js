@@ -1151,19 +1151,29 @@ async function submitRelatorio(template, ordem, onBack) {
     delete payload.templateId;
   }
 
+  // Strip large base64 from payload before sending (causes _zod server error)
+  const payloadClean = {...payload};
+  if(payloadClean.assinaturaCliente && payloadClean.assinaturaCliente.length > 50000) {
+    payloadClean.assinaturaCliente = null;
+  }
+  if(payloadClean.assinaturaTecnico && payloadClean.assinaturaTecnico.length > 50000) {
+    payloadClean.assinaturaTecnico = null;
+  }
+  // Ensure fotos are valid strings
+  if(payloadClean.fotos) {
+    payloadClean.fotos = payloadClean.fotos.filter(f => typeof f === 'string' && f.startsWith('data:')).slice(0,3);
+    if(!payloadClean.fotos.length) payloadClean.fotos = null;
+  }
+
   const btn = document.querySelector('.btn-gr:last-of-type');
   if(btn){btn.disabled=true;btn.innerHTML=`${IC.send} Enviando...`;}
 
   try {
     if(S.isOnline) {
       const proc = ordem?'campo.mobile.submitRelatorio':'campo.mobile.submitRelatorioDireto';
-      const result = await trpcMutation(proc, payload);
-      // If we got an id back, it succeeded even if there was a side error
-      if(!result && !result?.id) {
-        // still ok, server created it
-      }
+      await trpcMutation(proc, payloadClean);
     } else {
-      await queueAction(ordem?'submitRelatorio':'submitRelatorioDireto', payload);
+      await queueAction(ordem?'submitRelatorio':'submitRelatorioDireto', payloadClean);
     }
     if(ordem){const o=S.ordens.find(x=>x.id===ordem.id);if(o)o.status='concluida';}
     S.showNovoRelatorio=false;S.activeRelatorioOsId=null;S.selectedOrdemId=null;
