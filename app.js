@@ -1046,8 +1046,7 @@ function buildAssinaturas() {
     wrap.querySelector('#clr-cli').addEventListener('click',()=>clearSig('sig-cli','cli'));
     wrap.querySelector('#clr-tec').addEventListener('click',()=>clearSig('sig-tec','tec'));
     // Save names to relDados
-    wrap.querySelector('#sig-cli-nome').addEventListener('input',e=>{ S.relDados['_nomeCliente']=e.target.value; });
-    wrap.querySelector('#sig-tec-nome').addEventListener('input',e=>{ S.relDados['_nomeTecnico']=e.target.value; });
+    // Names stored separately, not in relDados
   },50);
   return wrap;
 }
@@ -1108,13 +1107,15 @@ async function submitRelatorio(template, ordem, onBack) {
   };
   const tipo = tipoMap[ordem?.tipo||template?.tipo||'']||'corretiva';
 
-  // Build dados — only string primitives, no base64, no internal keys
+  // Build dados — only safe string values
   const dadosSan = {};
   Object.entries(S.relDados).forEach(([k,v])=>{
-    if(k.startsWith('_')||k.endsWith('_foto')) return;
-    if(!v&&v!==0) return;
-    if(typeof v==='string'&&v.startsWith('data:')) return;
-    if(typeof v==='object') return;
+    if(k.startsWith('_')) return;           // no internal keys
+    if(k.endsWith('_foto')) return;         // no foto keys
+    if(k.endsWith('_obs')) { if(v) dadosSan[k]=String(v); return; }
+    if(v===null||v===undefined||v==='') return;
+    if(typeof v==='string'&&v.startsWith('data:')) return; // no base64
+    if(typeof v==='object') return;         // no objects
     dadosSan[k]=String(v);
   });
 
@@ -1179,8 +1180,12 @@ async function submitRelatorio(template, ordem, onBack) {
     S.showNovoRelatorio=false;S.activeRelatorioOsId=null;S.selectedOrdemId=null;
     S.tab='relatorios';
     resetRelForm();
-    if(S.isOnline) await loadServerData();
-    else await saveCache('ordens',S.ordens);
+    // Force reload from server to show new report
+    if(S.isOnline) {
+      await loadServerData();
+    } else {
+      await saveCache('ordens',S.ordens);
+    }
     render();
     showSuccess('Relatório enviado!','Dados salvos no CRM.');
   } catch(e) {
