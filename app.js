@@ -1110,14 +1110,16 @@ async function submitRelatorio(template, ordem, onBack) {
   if(!clienteNome){alert('Preencha o nome do cliente');return;}
   if(!ordem && !template?.id){alert('Template não selecionado');return;}
 
+  const TIPOS_VALIDOS = ["corretiva","preventiva","inspecao","instalacao","garantia","checklist_entrada","checklist_saida"];
   const tipoMap = {
-    corretiva:'corretiva',preventiva:'preventiva',inspecao:'inspecao',
-    checklist_entrada:'checklist_entrada',checklist_saida:'checklist_saida',
-    instalacao:'instalacao',garantia:'garantia',
-    checklist:'corretiva',formulario:'corretiva',os:'corretiva',
-    entrada_saida:'checklist_saida'
+    corretiva:"corretiva",preventiva:"preventiva",inspecao:"inspecao",
+    checklist_entrada:"checklist_entrada",checklist_saida:"checklist_saida",
+    instalacao:"instalacao",garantia:"garantia",
+    checklist:"corretiva",formulario:"corretiva",os:"corretiva",
+    entrada_saida:"checklist_saida",saida:"checklist_saida",entrada:"checklist_entrada"
   };
-  const tipo = tipoMap[ordem?.tipo||template?.tipo||'']||'corretiva';
+  const tipoRaw = tipoMap[ordem?.tipo||template?.tipo||""]||"corretiva";
+  const tipo = TIPOS_VALIDOS.includes(tipoRaw) ? tipoRaw : "corretiva";
 
   // Build dados — only safe string values
   const dadosSan = {};
@@ -1155,8 +1157,12 @@ async function submitRelatorio(template, ordem, onBack) {
   // Campos opcionais — só inclui se tiver valor real
   if(ordem?.equipamentoPatrimonio) payload.equipamentoPatrimonio = String(ordem.equipamentoPatrimonio);
   if(ordem?.equipamentoModelo) payload.equipamentoModelo = String(ordem.equipamentoModelo);
-  if(dadosSan['horimetro']) payload.horimetro = dadosSan['horimetro'];
-  if(obsParts.length) payload.observacoes = obsParts.join(' | ');
+  if(dadosSan["horimetro"]) payload.horimetro = dadosSan["horimetro"];
+  // Merge dados do template em observacoes (backend pode nao aceitar chaves aleatorias no schema)
+  const dadosExtra = Object.entries(dadosSan).filter(([k])=>k!=="horimetro").map(([k,v])=>`${k}: ${v}`).join(" | ");
+  const obsAll = [obsParts.join(" | "), dadosExtra].filter(Boolean).join(" | ");
+  if(obsAll) payload.observacoes = obsAll;
+  // Tenta enviar dados tambem — backend aceita se tiver z.record() no schema
   if(Object.keys(dadosSan).length) payload.dados = dadosSan;
   if(svsOk.length) payload.servicosRealizados = svsOk.map(s=>({descricao:String(s.descricao),concluido:Boolean(s.concluido)}));
   if(pcsOk.length) payload.pecasUtilizadas = pcsOk.map(p=>({nome:String(p.nome),codigo:p.codigo?String(p.codigo):null,quantidade:Number(p.quantidade)||1}));
@@ -1184,8 +1190,19 @@ async function submitRelatorio(template, ordem, onBack) {
 
   try {
     if(S.isOnline) {
-      const proc = ordem?'campo.mobile.submitRelatorio':'campo.mobile.submitRelatorioDireto';
-      await trpcMutation(proc, payloadClean);
+      // Usa endpoint REST puro (bypassa tRPC/superjson que causa erro _zod)
+      const endpoint = ordem ? ENDPOINTS.submitRelatorio : ENDPOINTS.submitRelatorioDireto;
+      const authHeaders = S.authToken ? {'Authorization': `Bearer ${S.authToken}`} : {};
+      const restRes = await fetch(endpoint, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {'Content-Type': 'application/json', ...authHeaders},
+        body: JSON.stringify(payloadClean),
+      });
+      const restJson = await restRes.json().catch(() => ({}));
+      if (!restRes.ok) {
+        throw new Error(restJson?.error || `Erro ${restRes.status}`);
+      }
     } else {
       await queueAction(ordem?'submitRelatorio':'submitRelatorioDireto', payloadClean);
     }
