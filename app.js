@@ -230,28 +230,28 @@ async function trpcMutation(procedure, input) {
     headers:{'Content-Type':'application/json', ...authHeaders},
     body: JSON.stringify({json: input})
   });
-  const text = await res.text();
-  let json;
-  try { json = JSON.parse(text); } catch(e) { throw new Error('Resposta inválida do servidor'); }
-
-  // tRPC response can be array (batch) or object
+  let text = '';
+  try { text = await res.text(); } catch(e) { throw new Error('Sem resposta do servidor'); }
+  let json = null;
+  try { json = JSON.parse(text); } catch(e) {
+    if(!res.ok) throw new Error(`Erro ${res.status}`);
+    throw new Error('Resposta inválida');
+  }
   if(Array.isArray(json)) json = json[0];
-
-  if(!res.ok || json?.error) {
-    // tRPC wraps errors in {error: {json: {message: ...}}} or {error: {message: ...}}
-    const err = json?.error;
-    const msg = err?.json?.message || err?.message || err?.data?.message
-              || (typeof err==='string'?err:null) || `Erro ${res.status}`;
+  if(json?.error) {
+    const err = json.error;
+    const msg = err?.json?.message || err?.message || err?.data?.message || `Erro ${res.status}`;
     throw new Error(msg);
   }
-
-  // tRPC wraps result in {result: {data: {json: ...}}} or {result: {data: ...}}
+  if(!res.ok) throw new Error(`Erro ${res.status}`);
   const data = json?.result?.data;
-  if(data && typeof data==='object' && 'json' in data) return data.json;
-  return data;
+  if(data !== undefined && data !== null) {
+    if(typeof data === 'object' && 'json' in data) return data.json;
+    return data;
+  }
+  return json;
 }
 
-// ── SERVER DATA LOADER ────────────────────────────────────────
 async function loadServerData() {
   if (!S.isOnline || !S.user) return;
   try {
