@@ -1121,6 +1121,14 @@ async function submitRelatorio(template, ordem, onBack) {
   const tipoRaw = tipoMap[ordem?.tipo||template?.tipo||""]||"corretiva";
   const tipo = TIPOS_VALIDOS.includes(tipoRaw) ? tipoRaw : "corretiva";
 
+  // Mapa id → label dos campos do template (para usar label legível nas observações)
+  const campoLabelMap = {};
+  // template direto, ou via templateId da OS buscando em S.templates
+  const templateCampos = template?.campos
+    || (ordem?.templateId ? S.templates.find(t=>t.id===ordem.templateId)?.campos : null)
+    || [];
+  templateCampos.forEach(c=>{ if(c.id&&c.label) campoLabelMap[c.id]=c.label; });
+
   // Build dados — only safe string values
   const dadosSan = {};
   Object.entries(S.relDados).forEach(([k,v])=>{
@@ -1158,12 +1166,19 @@ async function submitRelatorio(template, ordem, onBack) {
   if(ordem?.equipamentoPatrimonio) payload.equipamentoPatrimonio = String(ordem.equipamentoPatrimonio);
   if(ordem?.equipamentoModelo) payload.equipamentoModelo = String(ordem.equipamentoModelo);
   if(dadosSan["horimetro"]) payload.horimetro = dadosSan["horimetro"];
-  // Merge dados do template em observacoes (backend pode nao aceitar chaves aleatorias no schema)
-  const dadosExtra = Object.entries(dadosSan).filter(([k])=>k!=="horimetro").map(([k,v])=>`${k}: ${v}`).join(" | ");
+  // Merge dados do template em observacoes usando labels legíveis
+  const dadosExtra = Object.entries(dadosSan)
+    .filter(([k])=>k!=="horimetro")
+    .map(([k,v])=>`${campoLabelMap[k]||k}: ${v}`)
+    .join(" | ");
   const obsAll = [obsParts.join(" | "), dadosExtra].filter(Boolean).join(" | ");
   if(obsAll) payload.observacoes = obsAll;
-  // Tenta enviar dados tambem — backend aceita se tiver z.record() no schema
-  if(Object.keys(dadosSan).length) payload.dados = dadosSan;
+  // Envia dados com labels legíveis também (backend aceita z.record())
+  if(Object.keys(dadosSan).length) {
+    const dadosComLabel = {};
+    Object.entries(dadosSan).forEach(([k,v])=>{ dadosComLabel[campoLabelMap[k]||k]=v; });
+    payload.dados = dadosComLabel;
+  }
   if(svsOk.length) payload.servicosRealizados = svsOk.map(s=>({descricao:String(s.descricao),concluido:Boolean(s.concluido)}));
   if(pcsOk.length) payload.pecasUtilizadas = pcsOk.map(p=>({nome:String(p.nome),codigo:p.codigo?String(p.codigo):null,quantidade:Number(p.quantidade)||1}));
 
