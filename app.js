@@ -225,28 +225,26 @@ async function trpcQuery(procedure, input) {
 
 async function trpcMutation(procedure, input) {
   const authHeaders = S.authToken ? {'Authorization': `Bearer ${S.authToken}`} : {};
-  // Use tRPC batch format to avoid superjson _zod errors with null values
-  const res = await fetch(`${TRPC}/${procedure}?batch=1`, {
+  const res = await fetch(`${TRPC}/${procedure}`, {
     method:'POST', credentials:'include',
     headers:{'Content-Type':'application/json', ...authHeaders},
-    body: JSON.stringify({"0": {json: input}})
+    body: JSON.stringify({json: input})
   });
   let text = '';
-  try { text = await res.text(); } catch(e) { throw new Error('Sem resposta do servidor'); }
+  try { text = await res.text(); } catch(e) { throw new Error('Sem resposta'); }
   let parsed = null;
   try { parsed = JSON.parse(text); } catch(e) { throw new Error('Resposta inválida'); }
-  // Batch response is array
   const json = Array.isArray(parsed) ? parsed[0] : parsed;
-  // Return result if exists
+  // Return result if exists (success path)
   const data = json?.result?.data;
-  if(data!=null) {
-    if(typeof data==='object'&&'json' in data) return data.json;
+  if(data != null) {
+    if(typeof data === 'object' && 'json' in data) return data.json;
     return data;
   }
-  // Throw error
+  // Throw on error
   if(json?.error) {
     const err = json.error;
-    throw new Error(err?.json?.message||err?.message||`Erro ${res.status}`);
+    throw new Error(err?.json?.message || err?.message || `Erro ${res.status}`);
   }
   if(!res.ok) throw new Error(`Erro ${res.status}`);
   return json;
