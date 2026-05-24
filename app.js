@@ -343,22 +343,25 @@ async function doLogout() {
 }
 
 async function checkAuth() {
-  // Try to load cached user first
+  // Load cached user and token first
   const cached = await loadCache('user');
+  const cachedToken = await loadCache('authToken');
   if (cached) S.user = cached;
+  if (cachedToken) S.authToken = cachedToken;
 
-  if (!S.isOnline) return; // use cached user
+  if (!S.isOnline) return;
 
+  // Try to verify session - but NEVER clear user/token on failure
+  // The token in IndexedDB is the source of truth for the PWA
   try {
-    const res = await fetch(ENDPOINTS.me, {credentials:'include'});
+    const authH = S.authToken ? {'Authorization': `Bearer ${S.authToken}`} : {};
+    const res = await fetch(ENDPOINTS.me, {credentials:'include', headers: authH});
     if (res.ok) {
       const json = await res.json();
       S.user = { id: json.id, nome: json.nome, email: json.email, role: json.role };
       await saveCache('user', S.user);
-    } else {
-      S.user = null;
-      await saveCache('user', null);
     }
+    // If 401, keep using cached user+token — don't clear them
   } catch (e) {
     // offline - use cached
   }
