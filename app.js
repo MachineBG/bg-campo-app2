@@ -1089,438 +1089,88 @@ function captureGPS(fieldId) {
 
 // ── SUBMIT RELATÓRIO ──────────────────────────────────────────
 async function submitRelatorio(template, ordem, onBack) {
-  const clienteNome = ordem ? ordem.clienteNome : (document.getElementById('rel-cli')?.value||'').trim();
+  const clienteNome = ordem
+    ? (ordem.clienteNome||'').trim()
+    : (document.getElementById('rel-cli')?.value||'').trim();
   if(!clienteNome){alert('Preencha o nome do cliente');return;}
   if(!ordem && !template?.id){alert('Template não selecionado');return;}
+
+  const tipoMap = {
+    corretiva:'corretiva',preventiva:'preventiva',inspecao:'inspecao',
+    checklist_entrada:'checklist_entrada',checklist_saida:'checklist_saida',
+    instalacao:'instalacao',garantia:'garantia',
+    checklist:'corretiva',formulario:'corretiva',os:'corretiva',
+    entrada_saida:'checklist_saida'
+  };
+  const tipo = tipoMap[ordem?.tipo||template?.tipo||'']||'corretiva';
+
+  // Build dados — only string primitives, no base64, no internal keys
+  const dadosSan = {};
+  Object.entries(S.relDados).forEach(([k,v])=>{
+    if(k.startsWith('_')||k.endsWith('_foto')) return;
+    if(!v&&v!==0) return;
+    if(typeof v==='string'&&v.startsWith('data:')) return;
+    if(typeof v==='object') return;
+    dadosSan[k]=String(v);
+  });
 
   const obs = document.getElementById('rel-obs')?.value?.trim()||null;
   const nomeCliente = document.getElementById('sig-cli-nome')?.value?.trim()||null;
   const nomeTecnico = document.getElementById('sig-tec-nome')?.value?.trim()||S.user?.nome||null;
+  const obsParts=[obs,nomeCliente?`Cliente: ${nomeCliente}`:'',nomeTecnico?`Técnico: ${nomeTecnico}`:''].filter(Boolean);
 
-  // Build dados — only string values, no internal keys, no base64
-  const dadosSan = {};
-  Object.entries(S.relDados).forEach(([k,v])=>{
-    if(k.startsWith('_')||k.endsWith('_foto')||k.endsWith('_obs')) return;
-    if(v===null||v===undefined||v==='') return;
-    if(typeof v==='string'&&v.startsWith('data:')) return;
-    if(typeof v==='object') return;
-    dadosSan[k] = String(v);
-  });
-  // Add obs fields from select extras
-  Object.entries(S.relDados).forEach(([k,v])=>{
-    if(k.endsWith('_obs')&&v) dadosSan[k]=String(v);
-  });
-
+  const sigCli = document.getElementById('sig-cli')?.toDataURL('image/png')||null;
+  const sigTec = document.getElementById('sig-tec')?.toDataURL('image/png')||null;
   const svsOk = S.relServicos.filter(s=>s.descricao?.trim());
   const pcsOk = S.relPecas.filter(p=>p.nome?.trim());
 
-  // Signatures from canvas
-  const sigCliCanvas = document.getElementById('sig-cli');
-  const sigTecCanvas = document.getElementById('sig-tec');
-  const sigCli = sigCliCanvas && sigCliCanvas.width>0 ? sigCliCanvas.toDataURL('image/png') : null;
-  const sigTec = sigTecCanvas && sigTecCanvas.width>0 ? sigTecCanvas.toDataURL('image/png') : null;
-
-  // Build observacoes with names
-  const obsParts = [obs, nomeCliente?`Cliente: ${nomeCliente}`:'', nomeTecnico?`Técnico: ${nomeTecnico}`:''].filter(Boolean);
-  const observacoesFinal = obsParts.length ? obsParts.join(' | ') : null;
-
-  // Map tipo
-  const tipoMap = {corretiva:'corretiva',preventiva:'preventiva',inspecao:'inspecao',
-    checklist_entrada:'checklist_entrada',checklist_saida:'checklist_saida',
-    instalacao:'instalacao',garantia:'garantia',checklist:'corretiva',
-    formulario:'corretiva',os:'corretiva',entrada_saida:'checklist_saida'};
-  const tipo = tipoMap[ordem?.tipo||template?.tipo||'corretiva']||'corretiva';
-
   const payload = {
-    clienteNome,
+    templateId: Number(template?.id||0),
+    clienteNome: String(clienteNome),
     tipo,
-    observacoes: observacoesFinal,
-    dados: Object.keys(dadosSan).length ? dadosSan : null,
-    servicosRealizados: svsOk.length ? svsOk.map(s=>({descricao:String(s.descricao),concluido:Boolean(s.concluido)})) : null,
-    pecasUtilizadas: pcsOk.length ? pcsOk.map(p=>({nome:String(p.nome),codigo:p.codigo?String(p.codigo):null,quantidade:Number(p.quantidade)||1})) : null,
-    fotos: S.relFotos.length ? S.relFotos.filter(f=>typeof f==='string'&&f.startsWith('data:')) : null,
-    assinaturaCliente: sigCli && sigCli.length>1000 ? sigCli : null,
-    assinaturaTecnico: sigTec && sigTec.length>1000 ? sigTec : null,
-    descricao: null,
-    equipamentoPatrimonio: ordem?.equipamentoPatrimonio||null,
-    equipamentoModelo: ordem?.equipamentoModelo||null,
+    equipamentoId: null,
+    equipamentoPatrimonio: ordem?.equipamentoPatrimonio?String(ordem.equipamentoPatrimonio):null,
+    equipamentoModelo: ordem?.equipamentoModelo?String(ordem.equipamentoModelo):null,
     horimetro: dadosSan['horimetro']||null,
-  };
-
-  if(ordem) payload.ordemId = Number(ordem.id);
-  else payload.templateId = Number(template.id);
-
-  const btn = document.querySelector('.btn-gr:last-of-type');
-  if(btn){btn.disabled=true;btn.innerHTML=`${IC.send} Enviando...`;}
-
-  // Debug: log payload to console
-  console.log('BG Campo payload:', JSON.stringify(payload).slice(0,500));
-
-  try {
-    if(S.isOnline) {
-      if(ordem) {
-        await trpcMutation('campo.mobile.submitRelatorio', payload);
-      } else {
-        await trpcMutation('campo.mobile.submitRelatorioDireto', payload);
-      }
-    } else {
-      await queueAction(ordem?'submitRelatorio':'submitRelatorioDireto', payload);
-    }
-
-    if(ordem){const o=S.ordens.find(x=>x.id===ordem.id);if(o)o.status='concluida';}
-    S.showNovoRelatorio=false; S.activeRelatorioOsId=null; S.selectedOrdemId=null;
-    S.tab='relatorios';
-    resetRelForm();
-    if(S.isOnline) await loadServerData();
-    else await saveCache('ordens',S.ordens);
-    render();
-    showSuccess(S.isOnline?'Relatório enviado!':'Salvo offline — será sincronizado',
-      S.isOnline?'Veja o PDF no CRM em App de Campo → Relatórios.':'Será sincronizado quando voltar a internet.');
-  } catch(e) {
-    if(btn){btn.disabled=false;btn.innerHTML=`${IC.send} Enviar Relatório`;}
-    alert('Erro ao enviar: '+e.message);
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// BG CAMPO PWA — app.js
-// Conecta ao CRM BG Service (Railway) via cookie crm_session
-// Offline-first com IndexedDB + sync automático
-async function submitRelatorio(template, ordem, onBack) {
-  const clienteNome = ordem ? ordem.clienteNome : (document.getElementById('rel-cli')?.value||'').trim();
-  const obs = document.getElementById('rel-obs')?.value||'';
-  if(!clienteNome){alert('Preencha o nome do cliente');return;}
-  if(!ordem && !template?.id){alert('Template não selecionado');return;}
-
-  // Sanitize dados — only send valid strings, no base64, no internal keys
-  const dadosSan = {};
-  Object.entries(S.relDados).forEach(([k,v])=>{
-    if(k.startsWith('_')) return;  // skip internal keys like _nomeCliente
-    if(k.endsWith('_foto')) return; // skip foto keys (base64)
-    if(v===null||v===undefined||v==='') return;
-    if(typeof v==='string'&&v.startsWith('data:')) return; // no base64
-    if(typeof v==='object') return; // no objects
-    dadosSan[k]=typeof v==='boolean'?(v?'true':'false'):String(v);
-  });
-
-  const svsOk = S.relServicos.filter(s=>s.descricao.trim());
-  const pcsOk = S.relPecas.filter(p=>p.nome.trim());
-
-  // Map tipo to valid backend enum
-  const tipoMap = {corretiva:'corretiva',preventiva:'preventiva',inspecao:'inspecao',
-    checklist_entrada:'checklist_entrada',checklist_saida:'checklist_saida',
-    instalacao:'instalacao',garantia:'garantia',checklist:'corretiva',
-    formulario:'corretiva',os:'corretiva',entrada_saida:'checklist_saida'};
-  const tipoFinal = tipoMap[ordem?.tipo||template?.tipo||'corretiva']||'corretiva';
-
-  const payload = {
-    clienteNome,
-    tipo: tipoFinal,
-    observacoes: obs||null,
+    observacoes: obsParts.length?obsParts.join(' | '):null,
     dados: Object.keys(dadosSan).length?dadosSan:null,
-    servicosRealizados: svsOk.length?svsOk.map(s=>({descricao:s.descricao,concluido:!!s.concluido})):null,
-    pecasUtilizadas: pcsOk.length?pcsOk.map(p=>({nome:p.nome,codigo:p.codigo||null,quantidade:p.quantidade||1})):null,
-    fotos: null,
+    servicosRealizados: svsOk.length?svsOk.map(s=>({descricao:String(s.descricao),concluido:Boolean(s.concluido)})):null,
+    pecasUtilizadas: pcsOk.length?pcsOk.map(p=>({nome:String(p.nome),codigo:p.codigo?String(p.codigo):null,quantidade:Number(p.quantidade)||1})):null,
+    fotos: S.relFotos.length?S.relFotos.slice(0,5):null,
+    assinaturaCliente: sigCli&&sigCli.length>500?sigCli:null,
+    assinaturaTecnico: sigTec&&sigTec.length>500?sigTec:null,
+    descricao: null,
   };
-  if(ordem) payload.ordemId = ordem.id;
-  if(!ordem && template) payload.templateId = Number(template.id);
-  // Add names to observacoes
-  const nomeCliente = document.getElementById('sig-cli-nome')?.value||S.relDados['_nomeCliente']||'';
-  const nomeTecnico = document.getElementById('sig-tec-nome')?.value||S.relDados['_nomeTecnico']||S.user?.nome||'';
-  if(nomeCliente||nomeTecnico) {
-    const obsExtra = [payload.observacoes||'', nomeCliente?`Cliente: ${nomeCliente}`:'', nomeTecnico?`Técnico: ${nomeTecnico}`:''].filter(Boolean).join(' | ');
-    payload.observacoes = obsExtra||null;
+
+  if(ordem) {
+    payload.ordemId = Number(ordem.id);
+    delete payload.templateId;
   }
-  // Signatures — only send if canvas has content
-  const sigCliData = document.getElementById('sig-cli')?.toDataURL();
-  const sigTecData = document.getElementById('sig-tec')?.toDataURL();
-  if(sigCliData && sigCliData.length>1000) payload.assinaturaCliente=sigCliData;
-  if(sigTecData && sigTecData.length>1000) payload.assinaturaTecnico=sigTecData;
 
   const btn = document.querySelector('.btn-gr:last-of-type');
   if(btn){btn.disabled=true;btn.innerHTML=`${IC.send} Enviando...`;}
 
   try {
     if(S.isOnline) {
-      // Always use tRPC mutations with Bearer token — avoids cookie issues on iOS
-      if(ordem) {
-        await trpcMutation('campo.mobile.submitRelatorio', payload);
-      } else {
-        // submitRelatorioDireto requires templateId as number
-        if(!payload.templateId) throw new Error('Template não identificado');
-        await trpcMutation('campo.mobile.submitRelatorioDireto', payload);
-      }
+      const proc = ordem?'campo.mobile.submitRelatorio':'campo.mobile.submitRelatorioDireto';
+      await trpcMutation(proc, payload);
     } else {
       await queueAction(ordem?'submitRelatorio':'submitRelatorioDireto', payload);
     }
-
     if(ordem){const o=S.ordens.find(x=>x.id===ordem.id);if(o)o.status='concluida';}
-    S.showNovoRelatorio=false; S.activeRelatorioOsId=null; S.selectedOrdemId=null;
+    S.showNovoRelatorio=false;S.activeRelatorioOsId=null;S.selectedOrdemId=null;
     S.tab='relatorios';
     resetRelForm();
     if(S.isOnline) await loadServerData();
     else await saveCache('ordens',S.ordens);
     render();
-    showSuccess(S.isOnline?'Relatório enviado!':'Salvo offline — será sincronizado', S.isOnline?'Dados salvos no CRM.':'Será sincronizado quando voltar a internet.');
+    showSuccess('Relatório enviado!','Dados salvos no CRM.');
   } catch(e) {
     if(btn){btn.disabled=false;btn.innerHTML=`${IC.send} Enviar Relatório`;}
     alert('Erro ao enviar: '+e.message);
   }
 }
 
-function showSuccess(title, sub) {
-  const ov=div('sov');
-  ov.innerHTML=`<div class="sov-ico" style="color:var(--green)">${IC.checkCircle}</div><div class="sov-title">${title}</div><div class="sov-sub">${sub}</div>`;
-  document.body.appendChild(ov);
-  setTimeout(()=>ov.remove(),2500);
-}
-
-// ── VISITAS COMERCIAL ─────────────────────────────────────────
-function renderVisitas() {
-  const el = div('pad sp4');
-
-  if(!S.diaAtual) {
-    el.innerHTML=`
-      <div class="card">
-        <div class="card-b" style="text-align:center;padding:24px 16px 16px">
-          <div class="stat-ico ico-blue" style="margin:0 auto 12px">${IC.car.replace('viewBox','style="width:24px;height:24px" viewBox')}</div>
-          <h3 style="font-size:17px;font-weight:700;margin-bottom:4px">Iniciar Dia de Visitas</h3>
-          <p style="font-size:13px;color:var(--text-2)">Registre o km ao sair de casa</p>
-        </div>
-        <div class="card-b" style="padding-top:0">
-          <div class="fg" style="margin-bottom:12px">
-            <label class="lbl">Km Inicial *</label>
-            <input id="km-ini" type="number" class="inp" placeholder="Ex: 45230">
-          </div>
-          <button class="btn btn-bl" id="btn-ini-dia">${IC.nav} Iniciar Dia</button>
-        </div>
-      </div>
-      ${renderHistVis()}`;
-    el.querySelector('#btn-ini-dia').addEventListener('click',()=>iniciarDia(el.querySelector('#km-ini').value));
-  } else if(S.diaAtual.status==='aberto') {
-    el.innerHTML=`
-      <div style="background:var(--blue-dim);border:1px solid rgba(74,158,255,.2);border-radius:var(--r);padding:14px 16px">
-        <div class="flex jb aic">
-          <div><p style="font-size:11px;color:var(--blue)">Dia em andamento</p><p style="font-size:16px;font-weight:700">Km inicial: ${S.diaAtual.kmInicial||S.diaAtual.km_inicial}</p></div>
-          <span class="badge b-blue">${(S.diaAtual.checkins||[]).length} parada(s)</span>
-        </div>
-      </div>
-
-      ${(S.diaAtual.checkins||[]).length?`
-      <div>
-        <div class="sec-ttl">Paradas do Dia</div>
-        <div class="card">
-          ${(S.diaAtual.checkins||[]).map((c,i)=>`
-            <div class="ci-item${i>0?' ':''}" style="${i>0?'border-top:1px solid var(--border)':''}">
-              <div class="ci-num">${i+1}</div>
-              <div style="flex:1;min-width:0">
-                <p style="font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.clienteNome||c.cliente_nome}</p>
-                ${c.observacoes?`<span style="font-size:11px;color:var(--text-3)">${c.observacoes}</span>`:''}
-                <span style="font-size:10px;color:var(--text-3);font-family:var(--FM)">${c.hora?new Date(c.hora).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}):''}</span>
-              </div>
-              ${c.latitude||c.gps?`<div style="color:var(--green)">${IC.pin}</div>`:''}
-            </div>`).join('')}
-        </div>
-      </div>`:''}
-
-      <div class="card">
-        <div class="card-b">
-          <div class="sec-ttl">${IC.pin} Registrar Parada</div>
-          <div class="fg" style="margin-bottom:10px"><label class="lbl">Cliente / Local *</label><input id="ci-nome" class="inp" placeholder="Nome do cliente ou local visitado"></div>
-          <div class="fg" style="margin-bottom:12px"><label class="lbl">Observações</label><input id="ci-obs" class="inp" placeholder="O que foi tratado..."></div>
-          <button class="btn btn-or" id="btn-ci">${IC.check} Check-in</button>
-        </div>
-      </div>
-
-      <div style="background:var(--bg-card);border:1px solid rgba(255,68,85,.2);border-radius:var(--r)">
-        <div class="card-b">
-          <div class="sec-ttl">${IC.flag} Encerrar Dia</div>
-          <div class="fg" style="margin-bottom:10px"><label class="lbl">Km Final *</label><input id="km-fin" type="number" class="inp" placeholder="Ex: 45380"></div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
-            <div class="fg"><label class="lbl">Pedágio (R$)</label><input id="pedagio" type="number" class="inp" placeholder="0"></div>
-            <div class="fg"><label class="lbl">Outras desp.</label><input id="outras" type="number" class="inp" placeholder="0"></div>
-          </div>
-          <button class="btn btn-dn" id="btn-enc">${IC.flag} Encerrar e Gerar Reembolso</button>
-        </div>
-      </div>`;
-
-    el.querySelector('#btn-ci').addEventListener('click',()=>doCheckin(el.querySelector('#ci-nome').value,el.querySelector('#ci-obs').value));
-    el.querySelector('#btn-enc').addEventListener('click',()=>encerrarDia(el.querySelector('#km-fin').value,el.querySelector('#pedagio').value,el.querySelector('#outras').value));
-  } else {
-    el.innerHTML=`
-      <div style="background:var(--green-dim);border:1px solid rgba(46,201,124,.2);border-radius:var(--r);padding:20px;text-align:center;color:var(--green)">
-        ${IC.checkCircle}<p style="font-weight:700;margin-top:8px">Dia Encerrado</p>
-        <p style="font-size:13px;color:var(--text-2);margin-top:4px">Km: ${S.diaAtual.kmInicial||S.diaAtual.km_inicial} → ${S.diaAtual.kmFinal||S.diaAtual.km_final}</p>
-      </div>
-      <button class="btn btn-gh" id="btn-novo-dia">Iniciar Novo Dia</button>
-      ${renderHistVis()}`;
-    el.querySelector('#btn-novo-dia').addEventListener('click',()=>{S.diaAtual=null;saveCache('diaAtual',null);render();});
-  }
-  return el;
-}
-
-function renderHistVis() {
-  if(!S.historico.length) return '';
-  return `<div>
-    <div class="sec-ttl">Histórico</div>
-    <div class="sp3">
-      ${S.historico.map(d=>`
-        <div class="csm" style="padding:12px 14px;display:flex;justify-content:space-between;align-items:center">
-          <div>
-            <p style="font-size:14px;font-weight:600">${fmtDate(d.data||d.createdAt)}</p>
-            <p style="font-size:12px;color:var(--text-3)">${d.total_checkins||0} paradas · ${d.km_inicial||'—'}→${d.km_final||'…'} km</p>
-          </div>
-          <span class="badge ${d.status==='fechado'?'b-green':'b-blue'}">${d.status==='fechado'?'Fechado':'Aberto'}</span>
-        </div>`).join('')}
-    </div>
-  </div>`;
-}
-
-function getGPS() {
-  return new Promise(resolve=>{
-    if(!navigator.geolocation){resolve(null);return;}
-    navigator.geolocation.getCurrentPosition(
-      p=>resolve({lat:String(p.coords.latitude.toFixed(6)),lng:String(p.coords.longitude.toFixed(6))}),
-      ()=>resolve(null),
-      {enableHighAccuracy:true,timeout:10000}
-    );
-  });
-}
-
-async function iniciarDia(km) {
-  if(!km){alert('Informe o km inicial');return;}
-  const gps = await getGPS();
-  const payload = {kmInicial:km, latitude:gps?.lat, longitude:gps?.lng};
-  try {
-    if(S.isOnline) {
-      const r=await trpcMutation('campo.visitaComercial.iniciarDia',payload);
-      S.diaAtual=r||{status:'aberto',kmInicial:km,checkins:[]};
-    } else {
-      await queueAction('iniciarDia',payload);
-      S.diaAtual={status:'aberto',kmInicial:km,checkins:[]};
-    }
-    await saveCache('diaAtual',S.diaAtual);
-    render();
-  } catch(e){alert('Erro: '+e.message);}
-}
-
-async function doCheckin(nome,obs) {
-  if(!nome){alert('Informe o nome do cliente/local');return;}
-  const gps=await getGPS();
-  const payload={clienteNome:nome,observacoes:obs||undefined,latitude:gps?.lat,longitude:gps?.lng};
-  try {
-    if(S.isOnline) {
-      await trpcMutation('campo.visitaComercial.checkin',payload);
-      const r=await trpcQuery('campo.visitaComercial.diaAtual',{});
-      S.diaAtual=r;
-    } else {
-      await queueAction('checkin',payload);
-      if(S.diaAtual) { S.diaAtual.checkins=S.diaAtual.checkins||[]; S.diaAtual.checkins.push({clienteNome:nome,observacoes:obs,hora:new Date().toISOString(),gps:gps?`${gps.lat},${gps.lng}`:null}); }
-    }
-    await saveCache('diaAtual',S.diaAtual);
-    render();
-  } catch(e){alert('Erro: '+e.message);}
-}
-
-async function encerrarDia(km,pedagio,outras) {
-  if(!km){alert('Informe o km final');return;}
-  const gps=await getGPS();
-  const payload={kmFinal:km,pedagio:pedagio||undefined,outrasDespesas:outras||undefined,latitude:gps?.lat,longitude:gps?.lng};
-  try {
-    if(S.isOnline) {
-      const r=await trpcMutation('campo.visitaComercial.encerrarDia',payload);
-      if(r) alert(`Dia encerrado! ${r.kmRodados||'?'} km rodados. Reembolso: R$ ${r.valorTotal||'?'}`);
-      S.diaAtual={...S.diaAtual,status:'fechado',kmFinal:km};
-      await loadServerData();
-    } else {
-      await queueAction('encerrarDia',payload);
-      S.diaAtual={...S.diaAtual,status:'fechado',kmFinal:km};
-    }
-    await saveCache('diaAtual',S.diaAtual);
-    render();
-  } catch(e){alert('Erro: '+e.message);}
-}
-
-// ── PERFIL ────────────────────────────────────────────────────
-function renderPerfil() {
-  const u=S.user;
-  const el=div('pad sp4');
-  el.innerHTML=`
-    <div style="text-align:center;padding:24px 0 8px">
-      <div class="avatar">${(u.nome||'T').charAt(0).toUpperCase()}</div>
-      <h2 style="font-size:22px;font-weight:800;margin-top:12px;letter-spacing:-.5px">${u.nome}</h2>
-      <p style="font-size:13px;color:var(--text-2);margin-top:2px">${u.email}</p>
-      <span class="badge b-orange" style="margin-top:10px">${(u.role||'tecnico').toUpperCase()}</span>
-    </div>
-
-    <div class="det-sec">
-      ${u.telefone?`<div class="det-row"><span class="det-k">Telefone</span><span class="det-v">${u.telefone}</span></div>`:''}
-      ${u.especialidade?`<div class="det-row"><span class="det-k">Especialidade</span><span class="det-v">${u.especialidade}</span></div>`:''}
-      <div class="det-row"><span class="det-k">Acesso</span><span class="det-v">${u.role}</span></div>
-    </div>
-
-    <div class="det-sec">
-      <div class="det-row" style="flex-direction:column;gap:8px">
-        <span class="det-k">Cache Local</span>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-          <div style="text-align:center;padding:12px;background:var(--bg-card);border-radius:10px">
-            <p style="font-size:22px;font-weight:800;font-family:var(--FM)">${S.ordens.length}</p>
-            <p style="font-size:11px;color:var(--text-3)">OS no cache</p>
-          </div>
-          <div style="text-align:center;padding:12px;background:var(--bg-card);border-radius:10px">
-            <p style="font-size:22px;font-weight:800;font-family:var(--FM)">${S.syncQueue.length}</p>
-            <p style="font-size:11px;color:var(--text-3)">Pendentes sync</p>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    ${S.syncQueue.length?`
-    <div>
-      <div class="sec-ttl">Pendente de Sincronização</div>
-      <div class="sp3">
-        ${S.syncQueue.map(q=>`
-          <div class="q-item">
-            <div class="q-item-info">
-              <p>${{iniciarOrdem:'Iniciar OS',submitRelatorio:'Enviar Relatório',submitRelatorioDireto:'Novo Relatório',checkin:'Check-in',iniciarDia:'Iniciar Dia',encerrarDia:'Encerrar Dia'}[q.action]||q.action}</p>
-              <span>${new Date(q.ts).toLocaleTimeString('pt-BR')}</span>
-            </div>
-            <span class="badge b-yellow">Pendente</span>
-          </div>`).join('')}
-      </div>
-      <button class="btn btn-gh mt3" onclick="processSyncNow()">${IC.sync} Sincronizar Agora</button>
-    </div>`:''}
-
-    <button class="btn btn-gh" id="btn-refresh">${IC.sync} Atualizar Dados</button>
-    <button class="btn btn-gh" id="btn-debug" style="font-size:12px">🔍 Ver Diagnóstico</button>
-    <div id="debug-box" style="display:none;background:rgba(0,0,0,0.5);border:1px solid #333;border-radius:10px;padding:12px;font-family:monospace;font-size:11px;word-break:break-all;color:#0f0;margin-top:8px;white-space:pre-wrap"></div>
-    <button class="btn btn-dn" id="btn-logout">${IC.logout} Sair</button>
-  `;
-  el.querySelector('#btn-logout').addEventListener('click',doLogout);
-  el.querySelector('#btn-debug').addEventListener('click',()=>{
-    const box = el.querySelector('#debug-box');
-    box.style.display = box.style.display==='none'?'block':'none';
-    box.textContent = JSON.stringify({
-      user: S.user?.email,
-      token: S.authToken ? S.authToken.slice(0,30)+'...' : 'SEM TOKEN',
-      ordens: S.ordens.length,
-      templates: S.templates.length,
-      queue: S.syncQueue.length,
-      online: S.isOnline,
-      debug: S._debug,
-    }, null, 2);
-  });
-  el.querySelector('#btn-refresh').addEventListener('click',async()=>{
-    if(!S.isOnline){alert('Sem conexão');return;}
-    el.querySelector('#btn-refresh').disabled=true;
-    el.querySelector('#btn-refresh').innerHTML='Atualizando...';
-    await loadServerData();
-    render();
-  });
-  return el;
-}
-
-// ── SYNC ──────────────────────────────────────────────────────
 async function processSyncNow() {
   if(!S.isOnline){alert('Sem conexão');return;}
   await processQueue();
