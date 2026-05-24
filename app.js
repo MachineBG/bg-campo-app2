@@ -244,7 +244,16 @@ async function trpcMutation(procedure, input) {
   // Throw on error
   if(json?.error) {
     const err = json.error;
-    throw new Error(err?.json?.message || err?.message || `Erro ${res.status}`);
+    // Extract Zod field errors if present
+    const zodErrors = err?.json?.data?.zodError?.fieldErrors || err?.json?.data?.zodError?.formErrors;
+    if(zodErrors) {
+      const fields = Object.entries(zodErrors).map(([k,v])=>`${k}: ${Array.isArray(v)?v.join(', '):v}`).join(' | ');
+      throw new Error(`Campos inválidos — ${fields}`);
+    }
+    const msg = err?.json?.message || err?.message || `Erro ${res.status}`;
+    // Also store raw for debugging
+    console.error('[tRPC error raw]', JSON.stringify(err));
+    throw new Error(msg);
   }
   if(!res.ok) throw new Error(`Erro ${res.status}`);
   return json;
@@ -1122,47 +1131,48 @@ async function submitRelatorio(template, ordem, onBack) {
   const nomeTecnico = document.getElementById('sig-tec-nome')?.value?.trim()||S.user?.nome||null;
   const obsParts=[obs,nomeCliente?`Cliente: ${nomeCliente}`:'',nomeTecnico?`Técnico: ${nomeTecnico}`:''].filter(Boolean);
 
-  const sigCli = document.getElementById('sig-cli')?.toDataURL('image/png')||null;
-  const sigTec = document.getElementById('sig-tec')?.toDataURL('image/png')||null;
+  const sigCliCanvas = document.getElementById('sig-cli');
+  const sigTecCanvas = document.getElementById('sig-tec');
+  const sigCli = (sigCliCanvas && sigCliCanvas.tagName==='CANVAS') ? sigCliCanvas.toDataURL('image/png') : null;
+  const sigTec = (sigTecCanvas && sigTecCanvas.tagName==='CANVAS') ? sigTecCanvas.toDataURL('image/png') : null;
   const svsOk = S.relServicos.filter(s=>s.descricao?.trim());
   const pcsOk = S.relPecas.filter(p=>p.nome?.trim());
 
+  // Build payload — omit undefined/null fields that Zod rejects
   const payload = {
-    templateId: Number(template?.id||0),
     clienteNome: String(clienteNome),
     tipo,
-    equipamentoId: null,
-    equipamentoPatrimonio: ordem?.equipamentoPatrimonio?String(ordem.equipamentoPatrimonio):null,
-    equipamentoModelo: ordem?.equipamentoModelo?String(ordem.equipamentoModelo):null,
-    horimetro: dadosSan['horimetro']||null,
-    observacoes: obsParts.length?obsParts.join(' | '):null,
-    dados: Object.keys(dadosSan).length?dadosSan:null,
-    servicosRealizados: svsOk.length?svsOk.map(s=>({descricao:String(s.descricao),concluido:Boolean(s.concluido)})):null,
-    pecasUtilizadas: pcsOk.length?pcsOk.map(p=>({nome:String(p.nome),codigo:p.codigo?String(p.codigo):null,quantidade:Number(p.quantidade)||1})):null,
-    fotos: S.relFotos.length?S.relFotos.slice(0,5):null,
-    assinaturaCliente: sigCli&&sigCli.length>500?sigCli:null,
-    assinaturaTecnico: sigTec&&sigTec.length>500?sigTec:null,
-    descricao: null,
   };
+  // templateId só quando não tem ordem (submitRelatorioDireto)
+  if(!ordem && template?.id) payload.templateId = Number(template.id);
+  // ordemId só quando tem ordem (submitRelatorio)
+  if(ordem) payload.ordemId = Number(ordem.id);
+  // Campos opcionais — só inclui se tiver valor real
+  if(ordem?.equipamentoPatrimonio) payload.equipamentoPatrimonio = String(ordem.equipamentoPatrimonio);
+  if(ordem?.equipamentoModelo) payload.equipamentoModelo = String(ordem.equipamentoModelo);
+  if(dadosSan['horimetro']) payload.horimetro = dadosSan['horimetro'];
+  if(obsParts.length) payload.observacoes = obsParts.join(' | ');
+  if(Object.keys(dadosSan).length) payload.dados = dadosSan;
+  if(svsOk.length) payload.servicosRealizados = svsOk.map(s=>({descricao:String(s.descricao),concluido:Boolean(s.concluido)}));
+  if(pcsOk.length) payload.pecasUtilizadas = pcsOk.map(p=>({nome:String(p.nome),codigo:p.codigo?String(p.codigo):null,quantidade:Number(p.quantidade)||1}));
 
-  if(ordem) {
-    payload.ordemId = Number(ordem.id);
-    delete payload.templateId;
-  }
+  // Fotos — só base64 válido, máx 3
+  const fotosValidas = S.relFotos.filter(f=>typeof f==='string'&&f.startsWith('data:')).slice(0,3);
+  if(fotosValidas.length) payload.fotos = fotosValidas;
 
-  // Strip large base64 from payload before sending (causes _zod server error)
-  const payloadClean = {...payload};
-  if(payloadClean.assinaturaCliente && payloadClean.assinaturaCliente.length > 50000) {
-    payloadClean.assinaturaCliente = null;
-  }
-  if(payloadClean.assinaturaTecnico && payloadClean.assinaturaTecnico.length > 50000) {
-    payloadClean.assinaturaTecnico = null;
-  }
-  // Ensure fotos are valid strings
-  if(payloadClean.fotos) {
-    payloadClean.fotos = payloadClean.fotos.filter(f => typeof f === 'string' && f.startsWith('data:')).slice(0,3);
-    if(!payloadClean.fotos.length) payloadClean.fotos = null;
-  }
+  // Assinaturas — só inclui se canvas foi desenhado (>500 chars) e não é enorme
+  if(sigCli && sigCli.length > 500 && sigCli.length < 50000) payload.assinaturaCliente = sigCli;
+  if(sigTec && sigTec.length > 500 && sigTec.length < 50000) payload.assinaturaTecnico = sigTec;
+
+  // Log payload para debug (sem base64)
+  console.log('[submitRelatorio] payload enviado:', JSON.stringify({
+    ...payload,
+    assinaturaCliente: payload.assinaturaCliente ? `[base64 ${payload.assinaturaCliente.length}]` : undefined,
+    assinaturaTecnico: payload.assinaturaTecnico ? `[base64 ${payload.assinaturaTecnico.length}]` : undefined,
+    fotos: payload.fotos ? `[${payload.fotos.length} fotos]` : undefined,
+  }));
+
+  const payloadClean = payload;
 
   const btn = document.querySelector('.btn-gr:last-of-type');
   if(btn){btn.disabled=true;btn.innerHTML=`${IC.send} Enviando...`;}
