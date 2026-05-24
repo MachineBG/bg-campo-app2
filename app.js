@@ -243,16 +243,21 @@ async function trpcMutation(procedure, input) {
   }
   // Throw on error
   if(json?.error) {
-    const err = json.error;
-    // Extract Zod field errors if present
-    const zodErrors = err?.json?.data?.zodError?.fieldErrors || err?.json?.data?.zodError?.formErrors;
-    if(zodErrors) {
-      const fields = Object.entries(zodErrors).map(([k,v])=>`${k}: ${Array.isArray(v)?v.join(', '):v}`).join(' | ');
-      throw new Error(`Campos inválidos — ${fields}`);
+    let msg = `Erro ${res.status}`;
+    try {
+      const err = json.error;
+      console.error('[tRPC error raw]', JSON.stringify(err));
+      // Try to extract Zod field errors
+      const zod = err && err.json && err.json.data && err.json.data.zodError;
+      if(zod) {
+        const fe = zod.fieldErrors || {};
+        const fields = Object.entries(fe).map(([k,v])=>`${k}: ${Array.isArray(v)?v.join(', '):v}`).join(' | ');
+        if(fields) { throw new Error(`Campo inválido — ${fields}`); }
+      }
+      msg = (err && err.json && err.json.message) || (err && err.message) || msg;
+    } catch(inner) {
+      if(inner.message && !inner.message.startsWith('Erro ')) throw inner;
     }
-    const msg = err?.json?.message || err?.message || `Erro ${res.status}`;
-    // Also store raw for debugging
-    console.error('[tRPC error raw]', JSON.stringify(err));
     throw new Error(msg);
   }
   if(!res.ok) throw new Error(`Erro ${res.status}`);
