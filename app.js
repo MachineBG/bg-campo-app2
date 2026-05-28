@@ -371,15 +371,19 @@ async function doLogout() {
 }
 
 async function checkAuth() {
-  // Load cached user and token first
+  // Load cached user and token — these are the source of truth
   const cached = await loadCache('user');
   const cachedToken = await loadCache('authToken');
   if (cached) S.user = cached;
   if (cachedToken) S.authToken = cachedToken;
 
+  // If nothing in cache, go to login
+  if (!S.user && !S.authToken) { S.view = 'login'; return; }
+
   if (!S.isOnline) return;
 
-  // If we have a token, try to verify it
+  // Try to refresh user info — but NEVER clear token on failure
+  // The token from login is the source of truth, /me is only for updates
   if (S.authToken) {
     try {
       const authH = {'Authorization': `Bearer ${S.authToken}`};
@@ -388,17 +392,10 @@ async function checkAuth() {
         const json = await res.json();
         S.user = { id: json.id, nome: json.nome, email: json.email, role: json.role };
         await saveCache('user', S.user);
-      } else if (res.status === 401) {
-        // Token inválido — limpa tudo e força login
-        S.authToken = null; S.user = null;
-        await saveCache('authToken', null); await saveCache('user', null);
-        try { localStorage.removeItem('bgcampo_authToken'); localStorage.removeItem('bgcampo_user'); } catch(e){}
       }
+      // If 401 on /me: do NOT clear token - backend may not support Bearer yet
+      // The submit endpoint will tell us if the token is truly invalid
     } catch (e) { /* offline */ }
-  }
-  // Se não tem token E não tem usuário em cache, vai para login
-  if (!S.authToken && !S.user) {
-    S.view = 'login';
   }
 }
 
@@ -1275,11 +1272,13 @@ async function submitRelatorio(template, ordem, onBack) {
       // Usa endpoint REST puro (bypassa tRPC/superjson que causa erro _zod)
       const endpoint = ordem ? ENDPOINTS.submitRelatorio : ENDPOINTS.submitRelatorioDireto;
       const authHeaders = S.authToken ? {'Authorization': `Bearer ${S.authToken}`} : {};
+      // Also pass token in body as fallback for environments where headers are stripped
+      const bodyWithToken = S.authToken ? {...payloadClean, _authToken: S.authToken} : payloadClean;
       const restRes = await fetch(endpoint, {
         method: 'POST',
         credentials: 'include',
         headers: {'Content-Type': 'application/json', ...authHeaders},
-        body: JSON.stringify(payloadClean),
+        body: JSON.stringify(bodyWithToken),
       });
       const restJson = await restRes.json().catch(() => ({}));
       if (!restRes.ok) {
