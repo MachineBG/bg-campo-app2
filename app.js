@@ -379,19 +379,26 @@ async function checkAuth() {
 
   if (!S.isOnline) return;
 
-  // Try to verify session - but NEVER clear user/token on failure
-  // The token in IndexedDB is the source of truth for the PWA
-  try {
-    const authH = S.authToken ? {'Authorization': `Bearer ${S.authToken}`} : {};
-    const res = await fetch(ENDPOINTS.me, {credentials:'include', headers: authH});
-    if (res.ok) {
-      const json = await res.json();
-      S.user = { id: json.id, nome: json.nome, email: json.email, role: json.role };
-      await saveCache('user', S.user);
-    }
-    // If 401, keep using cached user+token — don't clear them
-  } catch (e) {
-    // offline - use cached
+  // If we have a token, try to verify it
+  if (S.authToken) {
+    try {
+      const authH = {'Authorization': `Bearer ${S.authToken}`};
+      const res = await fetch(ENDPOINTS.me, {credentials:'include', headers: authH});
+      if (res.ok) {
+        const json = await res.json();
+        S.user = { id: json.id, nome: json.nome, email: json.email, role: json.role };
+        await saveCache('user', S.user);
+      } else if (res.status === 401) {
+        // Token inválido — limpa tudo e força login
+        S.authToken = null; S.user = null;
+        await saveCache('authToken', null); await saveCache('user', null);
+        try { localStorage.removeItem('bgcampo_authToken'); localStorage.removeItem('bgcampo_user'); } catch(e){}
+      }
+    } catch (e) { /* offline */ }
+  }
+  // Se não tem token E não tem usuário em cache, vai para login
+  if (!S.authToken && !S.user) {
+    S.view = 'login';
   }
 }
 
@@ -1276,6 +1283,14 @@ async function submitRelatorio(template, ordem, onBack) {
       });
       const restJson = await restRes.json().catch(() => ({}));
       if (!restRes.ok) {
+        if (restRes.status === 401) {
+          // Token expirado ou ausente — limpa sessão e força login
+          S.authToken = null; S.user = null;
+          await saveCache('authToken', null); await saveCache('user', null);
+          try { localStorage.removeItem('bgcampo_authToken'); localStorage.removeItem('bgcampo_user'); } catch(e){}
+          alert('Sessão expirada. Faça login novamente.');
+          S.view = 'login'; render(); return;
+        }
         throw new Error(restJson?.error || `Erro ${restRes.status}`);
       }
     } else {
