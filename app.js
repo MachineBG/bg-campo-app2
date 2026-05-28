@@ -143,8 +143,24 @@ async function dbDelete(store, key) {
 }
 
 // ── CACHE HELPERS ─────────────────────────────────────────────
-async function saveCache(key, value) { await dbPut('cache', key, value); }
-async function loadCache(key) { return await dbGet('cache', key); }
+async function saveCache(key, value) {
+  await dbPut('cache', key, value);
+  // Backup token in localStorage for iOS PWA (IndexedDB resets on reinstall)
+  if (key === 'authToken' || key === 'user') {
+    try { localStorage.setItem('bgcampo_'+key, JSON.stringify(value)); } catch(e) {}
+  }
+}
+async function loadCache(key) {
+  let val = await dbGet('cache', key);
+  // Fallback to localStorage if IndexedDB lost data (iOS reinstall)
+  if ((val === undefined || val === null) && (key === 'authToken' || key === 'user')) {
+    try {
+      const ls = localStorage.getItem('bgcampo_'+key);
+      if (ls) { val = JSON.parse(ls); await dbPut('cache', key, val); }
+    } catch(e) {}
+  }
+  return val;
+}
 
 // ── OFFLINE QUEUE ─────────────────────────────────────────────
 async function queueAction(action, payload) {
@@ -907,7 +923,24 @@ function buildRelForm(template, ordem, onBack) {
         w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label>
           <input class="inp" type="number" inputmode="decimal" data-cid="${campo.id}" placeholder="${campo.placeholder||campo.label}" value="${S.relDados[campo.id]||''}"></div>`;
         w.querySelector('input').addEventListener('change',e=>{S.relDados[campo.id]=e.target.value;});
+      } else if (campo.tipo === 'assinatura') {
+        // Campo de assinatura do template — renderiza pad inline
+        const sid = 'sig-tmpl-'+campo.id.replace(/[^a-z0-9]/gi,'');
+        w.innerHTML=`<div class="fg">
+          <div class="flex jb aic" style="margin-bottom:6px">
+            <label class="lbl">${campo.label}</label>
+            <button class="btn" style="padding:3px 10px;font-size:12px" data-clrsig="${sid}">Limpar</button>
+          </div>
+          <canvas id="${sid}" width="600" height="180" style="width:100%;height:180px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--rs);touch-action:none"></canvas>
+        </div>`;
+        w.querySelector('[data-clrsig]')?.addEventListener('click',()=>{
+          const c=document.getElementById(sid); if(!c) return;
+          c.getContext('2d').clearRect(0,0,c.width,c.height);
+          S.relDados[campo.id]='';
+        });
+        setTimeout(()=>initSigPad(sid, val=>{ S.relDados[campo.id]=val; }),50);
       } else {
+        // Default: text input
         w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label>
           <input class="inp" type="text" data-cid="${campo.id}" placeholder="${campo.placeholder||campo.label}" value="${S.relDados[campo.id]||''}"></div>`;
         w.querySelector('input').addEventListener('change',e=>{S.relDados[campo.id]=e.target.value;});
@@ -934,8 +967,12 @@ function buildRelForm(template, ordem, onBack) {
   obsSec.innerHTML=`<label class="lbl">Observações Gerais</label><textarea id="rel-obs" class="txta" placeholder="Observações adicionais..."></textarea>`;
   frag.appendChild(obsSec);
 
-  // Assinaturas
-  frag.appendChild(buildAssinaturas());
+  // Assinaturas — só adiciona as fixas se o template NÃO tiver campos de assinatura/horímetro
+  const camposTmpl = template?.campos || [];
+  const tmplTemAssinatura = camposTmpl.some(c => c?.tipo === 'assinatura');
+  if (!tmplTemAssinatura) {
+    frag.appendChild(buildAssinaturas());
+  }
 
   // Submit
   const submitBtn = document.createElement('button');
@@ -1082,6 +1119,29 @@ function initSig(id, type) {
   canvas.addEventListener('mouseup',end);
   canvas.addEventListener('mouseleave',end);
   // iOS pointer events fallback
+  canvas.addEventListener('pointerdown',start,{passive:false});
+  canvas.addEventListener('pointermove',move,{passive:false});
+  canvas.addEventListener('pointerup',end);
+}
+
+function initSigPad(id, onChange) {
+  const canvas=document.getElementById(id); if(!canvas) return;
+  const ctx=canvas.getContext('2d');
+  canvas.width=canvas.offsetWidth*devicePixelRatio||600;
+  canvas.height=180*devicePixelRatio;
+  ctx.scale(devicePixelRatio,devicePixelRatio);
+  let drawing=false;
+  const pos=e=>{const r=canvas.getBoundingClientRect();const src=e.touches?e.touches[0]:e;return{x:src.clientX-r.left,y:src.clientY-r.top}};
+  const start=e=>{e.preventDefault();drawing=true;const p=pos(e);ctx.beginPath();ctx.moveTo(p.x,p.y)};
+  const move=e=>{if(!drawing)return;e.preventDefault();const p=pos(e);ctx.lineTo(p.x,p.y);ctx.strokeStyle='#f0f4ff';ctx.lineWidth=2;ctx.lineCap='round';ctx.lineJoin='round';ctx.stroke()};
+  const end=()=>{drawing=false;if(onChange)onChange(canvas.toDataURL())};
+  canvas.addEventListener('touchstart',start,{passive:false});
+  canvas.addEventListener('touchmove',move,{passive:false});
+  canvas.addEventListener('touchend',end,{passive:false});
+  canvas.addEventListener('mousedown',start);
+  canvas.addEventListener('mousemove',move);
+  canvas.addEventListener('mouseup',end);
+  canvas.addEventListener('mouseleave',end);
   canvas.addEventListener('pointerdown',start,{passive:false});
   canvas.addEventListener('pointermove',move,{passive:false});
   canvas.addEventListener('pointerup',end);
