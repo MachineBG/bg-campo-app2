@@ -1,1312 +1,274 @@
-import "dotenv/config";
-
-// ─── GLOBAL ERROR HANDLERS (prevent crash on unhandled errors) ───────────────
-process.on('uncaughtException', (err) => {
-  console.error('[FATAL] Uncaught Exception:', err.message);
-  console.error(err.stack);
-  // Don't exit - let the process continue
-});
-process.on('unhandledRejection', (reason: any) => {
-  console.error('[WARN] Unhandled Rejection:', reason?.message || reason);
-  if (reason?.stack) console.error(reason.stack);
-  // Don't exit - let the process continue
-});
-
-import express from "express";
-import { createServer } from "http";
-import net from "net";
-import path from "path";
-import fs from "fs";
-import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import { registerOAuthRoutes } from "./oauth";
-import { appRouter } from "../routers";
-import { createContext } from "./context";
-import { serveStatic, setupVite } from "./vite";
-import excelRoutes from "../excelRoutes";
-import crmAuthRoutes from "../crmAuthRoutes";
-import cotacaoUploadRoutes from "../cotacaoUploadRoutes";
-import importProspectsRoute from "../importProspectsRoute";
-import bureauUploadRoutes from "../bureauUploadRoutes";
-import { seedAdminSeNecessario, verificarToken, buscarUsuarioPorId } from "../crmAuth";
-import importDataRoute from "../importDataRoute";
-import contratosImportRoute from "../contratosImportRoute";
-import bensImportRoute from "../bensImportRoute";
-import bulkActionsRoute from "../bulkActionsRoute";
-import genericImportRoute from "../genericImportRoute";
-import pdfPreviewRoute from "../pdfPreviewRoute";
-import dataOpsRoute from "../dataOpsRoute";
-import nfImportRoute from "../nfImportRoute";
-import fichaTecnicaRoute from "../fichaTecnicaRoute";
-import propostaAnexoRoutes from "../propostaAnexoRoutes";
-import cookieParser from "cookie-parser";
-import { runMigrations } from "../migrate";
-import { getDb } from "../db";
-import { bens, bemManutencaoHistorico, chamados, relatoriosAtendimento, contratoItens, pipelineOportunidades, oportunidadeTimeline, agentSessions } from "../../drizzle/schema";
-import { eq, isNotNull, desc, sql } from "drizzle-orm";
-import { handleWhatsAppWebhook, runFollowups } from "../routers/whatsappAgent";
-
-function isPortAvailable(port: number): Promise<boolean> {
-  return new Promise(resolve => {
-    const server = net.createServer();
-    server.listen(port, () => {
-      server.close(() => resolve(true));
-    });
-    server.on("error", () => resolve(false));
-  });
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="BG Campo">
+<meta name="theme-color" content="#080e1a">
+<title>BG Campo</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Barlow:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg-deep: #080e1a;
+  --bg-base: #0a1628;
+  --bg-card: rgba(255,255,255,0.04);
+  --bg-card-hover: rgba(255,255,255,0.07);
+  --border: rgba(255,255,255,0.08);
+  --border-hi: rgba(255,255,255,0.15);
+  --text: #f0f4ff;
+  --text-2: #8899bb;
+  --text-3: #4a5a7a;
+  --orange: #ff6b2b;
+  --orange-dim: rgba(255,107,43,0.14);
+  --orange-bdr: rgba(255,107,43,0.28);
+  --blue: #4a9eff;
+  --blue-dim: rgba(74,158,255,0.12);
+  --green: #2ec97c;
+  --green-dim: rgba(46,201,124,0.12);
+  --red: #ff4455;
+  --red-dim: rgba(255,68,85,0.1);
+  --yellow: #ffbb33;
+  --yellow-dim: rgba(255,187,51,0.1);
+  --purple: #a78bfa;
+  --F: 'Barlow', sans-serif;
+  --FM: 'IBM Plex Mono', monospace;
+  --r: 14px;
+  --rs: 10px;
+  --nav-h: 68px;
+  --hdr-h: 56px;
 }
-
-async function findAvailablePort(startPort: number = 3000): Promise<number> {
-  for (let port = startPort; port < startPort + 20; port++) {
-    if (await isPortAvailable(port)) {
-      return port;
-    }
-  }
-  throw new Error(`No available port found starting from ${startPort}`);
-}
-
-// ── Global Error Handlers (prevent crashes) ──────────────────────────────────
-process.on("uncaughtException", (err) => {
-  console.error("[FATAL] Uncaught Exception:", err);
-  // Don't exit - let the process continue serving
-});
-
-process.on("unhandledRejection", (reason, promise) => {
-  console.error("[WARN] Unhandled Promise Rejection:", reason);
-  // Don't exit - let the process continue serving
-});
-
-async function startServer() {
-  const app = express();
-  const server = createServer(app);
-  // Configure body parser with larger size limit for file uploads
-  app.use(express.json({ limit: "50mb" }));
-  app.use(express.urlencoded({ limit: "50mb", extended: true }));
-  app.use(cookieParser());
-// ── CORS for BG Campo PWA ──────────────────────────────────────────────────
-const CAMPO_PWA_ORIGINS = [
-  "https://machinebg.github.io",
-  "http://localhost:5173",
-  "http://localhost:3000",
-];
-app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
-  const origin = req.headers.origin || "";
-  if (CAMPO_PWA_ORIGINS.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Access-Control-Allow-Credentials", "true");
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,Cookie");
-    if (req.method === "OPTIONS") { res.status(204).end(); return; }
-  }
-  next();
-});
-// ── end CORS ───────────────────────────────────────────────────────────────
-
-  // OAuth callback under /api/oauth/callback
-  registerOAuthRoutes(app);
-  // CRM Auth routes (login/senha próprio)
-  app.use("/api/crm-auth", crmAuthRoutes);
-  // Excel export/import routes
-  app.use("/api/excel", excelRoutes);
-  // Upload de PDF para cotações
-  app.use("/api/cotacoes", cotacaoUploadRoutes);
-  // Importação de prospects via CSV/XLSX
-  app.use("/api/prospects/import", importProspectsRoute);
-  // Bureau de crédito: importação de relatórios SPC/Serasa
-  app.use("/api/bureau", bureauUploadRoutes);
-  // Temporary bulk data import route
-  app.use("/api/import", importDataRoute);
-  // Importação de contratos via Excel
-  app.use("/api/contratos", contratosImportRoute);
-  app.use("/api/bens/import-excel", bensImportRoute);
-  app.use("/api/bulk", bulkActionsRoute);
-  app.use(genericImportRoute); // Generic Excel import for all modules
-  app.use("/api/pdf", pdfPreviewRoute); // PDF preview/print route
-  app.use("/api/data-ops", dataOpsRoute); // One-time data operations (prices, contracts, andaimes)
-  app.use("/api/nf", nfImportRoute); // NF-e PDF import for equipment/scaffolding registration
-  app.use("/api/bens", fichaTecnicaRoute); // Upload de ficha técnica PDF para equipamentos
-  app.use("/api/propostas", propostaAnexoRoutes); // Upload de anexos para propostas
-
-  // Serve uploaded files (PDFs, images, etc.) from persistent storage
-  // Priority: UPLOAD_DIR env var > /data/uploads (Railway Volume) > ./uploads (local dev)
-  const uploadDir = process.env.UPLOAD_DIR
-    || (fs.existsSync("/data") ? "/data/uploads" : path.resolve(process.cwd(), "uploads"));
-  if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir, { recursive: true });
-  }
-  app.use("/uploads", express.static(uploadDir, {
-    maxAge: "1d",
-    setHeaders: (res, filePath) => {
-      if (filePath.endsWith(".pdf")) {
-        res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", "inline");
-      }
-    },
-  }));
-  // Run migrations first, then seed admin
-  try {
-    await runMigrations();
-    console.log("[Startup] Migrations done, seeding admin...");
-  } catch (e) {
-    console.error("[Startup] Migration error (non-fatal):", e);
-  }
-  seedAdminSeNecessario().catch(console.error);
-
-  // Inject CRM user into req for tRPC context (for region-based filtering)
-  app.use("/api/trpc", async (req, _res, next) => {
-    try {
-      const token = req.cookies?.["crm_session"];
-      if (token) {
-        const payload = await verificarToken(token);
-        if (payload) {
-          const crmUser = await buscarUsuarioPorId(payload.id);
-          if (crmUser && crmUser.ativo) {
-            let regioesArr: string[] = [];
-            try { regioesArr = crmUser.regioes ? JSON.parse(crmUser.regioes) : []; } catch { regioesArr = []; }
-            (req as any).crmUser = {
-              id: crmUser.id, nome: crmUser.nome, email: crmUser.email,
-              role: crmUser.role, regioes: regioesArr,
-            };
-          }
-        }
-      }
-    } catch { /* ignore */ }
-    next();
-  });
-
-  // ── ENDPOINT REST PURO: submitRelatorio (bypassa tRPC/superjson) ──────────
-  // Resolve o erro "_zod" causado pelo superjson transformer do tRPC
-  app.post("/api/campo/submit-relatorio", async (req, res) => {
-    try {
-      const bearerToken = req.headers?.["authorization"]?.replace("Bearer ", "").trim();
-      const token = bearerToken || req.cookies?.["crm_session"];
-      if (!token) return res.status(401).json({ error: "Não autenticado" });
-      const payload = await verificarToken(token);
-      if (!payload) return res.status(401).json({ error: "Token inválido" });
-      const crmUser = await buscarUsuarioPorId(payload.id);
-      if (!crmUser || !crmUser.ativo) return res.status(401).json({ error: "Usuário inativo" });
-
-      const input = req.body;
-      const { ordemId, horimetro, observacoes, dados, servicosRealizados,
-              pecasUtilizadas, fotos, assinaturaCliente, assinaturaTecnico,
-              equipamentoId, equipamentoPatrimonio, equipamentoModelo } = input;
-
-      if (!ordemId) return res.status(400).json({ error: "ordemId é obrigatório" });
-
-      const db = await getDb();
-      if (!db) return res.status(500).json({ error: "Banco indisponível" });
-
-      const { campoOrdens, campoRelatorios, crmUsers, relatoriosAtendimento, bens, bemStatusHistorico } = await import("../../drizzle/schema");
-      const { eq, isNull, and } = await import("drizzle-orm");
-
-      const [ordem] = await db.select().from(campoOrdens).where(eq(campoOrdens.id, Number(ordemId)));
-      if (!ordem) return res.status(404).json({ error: "OS não encontrada" });
-      if (ordem.tecnicoId && ordem.tecnicoId !== crmUser.id) return res.status(403).json({ error: "OS não atribuída a você" });
-
-      const finalEquipPatrimonio = equipamentoPatrimonio || ordem.equipamentoPatrimonio;
-      const finalEquipModelo = equipamentoModelo || ordem.equipamentoModelo;
-      const finalEquipId = equipamentoId ? Number(equipamentoId) : (ordem.equipamentoId || null);
-
-      if (equipamentoPatrimonio || equipamentoId) {
-        await db.update(campoOrdens).set({
-          equipamentoPatrimonio: finalEquipPatrimonio || null,
-          equipamentoModelo: finalEquipModelo || null,
-          equipamentoId: finalEquipId || null,
-        }).where(eq(campoOrdens.id, Number(ordemId)));
-      }
-
-      const [result] = await db.insert(campoRelatorios).values({
-        ordemId: Number(ordemId),
-        tecnicoId: crmUser.id,
-        templateId: ordem.templateId || null,
-        clienteNome: ordem.clienteNome || null,
-        equipamentoPatrimonio: finalEquipPatrimonio || null,
-        equipamentoModelo: finalEquipModelo || null,
-        dados: dados ? JSON.stringify(dados) : null,
-        fotos: fotos ? JSON.stringify(fotos) : null,
-        assinaturaCliente: assinaturaCliente || null,
-        assinaturaTecnico: assinaturaTecnico || null,
-        horimetro: horimetro || null,
-        pecasUtilizadas: pecasUtilizadas ? JSON.stringify(pecasUtilizadas) : null,
-        servicosRealizados: servicosRealizados ? JSON.stringify(servicosRealizados) : null,
-        observacoes: observacoes || null,
-        status: "enviado",
-        layoutRelatorio: "bg_service",
-      });
-
-      await db.update(campoOrdens).set({ status: "concluida", dataConclusao: new Date() }).where(eq(campoOrdens.id, Number(ordemId)));
-
-      // ── Automação de status do equipamento baseada no tipo da OS ──────────
-      if (finalEquipId) {
-        try {
-          const { bemAlocacoes, contratosLocacao, contratoItens: ciTable } = await import("../../drizzle/schema");
-          const { desc: descOrd } = await import("drizzle-orm");
-          const [currentBem] = await db.select({ status: bens.status }).from(bens).where(eq(bens.id, finalEquipId));
-          const tipoOS = ordem.tipo;
-
-          if (tipoOS === "checklist_saida") {
-            // Saída → Alugado
-            if (currentBem && currentBem.status !== "alugado") {
-              await db.update(bens).set({ status: "alugado" }).where(eq(bens.id, finalEquipId));
-              await db.insert(bemStatusHistorico).values({
-                bemId: finalEquipId, statusAnterior: currentBem.status, statusNovo: "alugado",
-                motivo: `Checklist saída - App Campo OS #${ordem.numero} - técnico ${crmUser.nome}`,
-              });
-              // Criar alocação
-              await db.insert(bemAlocacoes).values({
-                bemId: finalEquipId, dataInicio: new Date(), status: "ativa",
-                observacoes: `Saída via App Campo OS #${ordem.numero} - ${ordem.clienteNome}`,
-              });
-            }
-          } else if (tipoOS === "checklist_entrada") {
-            // Entrada → Revisão + finalizar alocação
-            if (currentBem && currentBem.status !== "revisao") {
-              await db.update(bens).set({ status: "revisao", localizacao: "Galpão BG - Revisão" }).where(eq(bens.id, finalEquipId));
-              await db.insert(bemStatusHistorico).values({
-                bemId: finalEquipId, statusAnterior: currentBem.status, statusNovo: "revisao",
-                motivo: `Checklist entrada (retorno) - App Campo OS #${ordem.numero}`,
-              });
-              const [alocAtiva] = await db.select().from(bemAlocacoes)
-                .where(and(eq(bemAlocacoes.bemId, finalEquipId), eq(bemAlocacoes.status, "ativa")))
-                .orderBy(descOrd(bemAlocacoes.dataInicio));
-              if (alocAtiva) {
-                await db.update(bemAlocacoes).set({ status: "concluida", dataRetorno: new Date() }).where(eq(bemAlocacoes.id, alocAtiva.id));
-              }
-            }
-          } else if (tipoOS === "inspecao" || tipoOS === "checklist_entrada") {
-            // Liberação interna → Disponível (usando tipo inspecao como proxy para liberacao_interna no campo)
-            if (currentBem && ["revisao", "manutencao", "reforma"].includes(currentBem.status)) {
-              await db.update(bens).set({ status: "disponivel", localizacao: "Galpão BG - Liberado" }).where(eq(bens.id, finalEquipId));
-              await db.insert(bemStatusHistorico).values({
-                bemId: finalEquipId, statusAnterior: currentBem.status, statusNovo: "disponivel",
-                motivo: `Liberação interna - App Campo OS #${ordem.numero}`,
-              });
-            }
-          }
-        } catch (eStatus: any) {
-          console.warn("[Campo REST] Erro na automação de status:", eStatus.message);
-        }
-      }
-
-      const [tecnico] = await db.select({ nome: crmUsers.nome }).from(crmUsers).where(eq(crmUsers.id, crmUser.id));
-
-      // ── Calcular custo de manutenção (igual ao produttivo.ts) ─────────────
-      let custoManutencaoCalc = 0;
-      const tipoOS = ordem.tipo || "corretiva";
-      const SEM_CUSTO_TIPOS = ["checklist_entrada", "checklist_saida", "inspecao"];
-
-      try {
-        const { sql: sqlDrizzle } = await import("drizzle-orm");
-        const [cfgRows] = await db.execute(sqlDrizzle`SELECT * FROM manutencao_config ORDER BY id DESC LIMIT 1`);
-        const cfg = (cfgRows as any[])[0];
-        const valorHoraCentavos = cfg?.valor_hora_tecnica_centavos || 25000;
-        const valorKmCentavos = cfg?.valor_km_centavos || 200;
-        const latOrigem = cfg?.lat_origem || "-23.6940";
-        const lngOrigem = cfg?.lng_origem || "-46.5650";
-
-        if (!SEM_CUSTO_TIPOS.includes(tipoOS)) {
-          const dadosObj: Record<string, any> = typeof dados === "object" && dados ? dados : {};
-          const HORA_KEYS = ["hora técnica", "hora tecnica", "horas técnicas", "horas tecnicas",
-            "tempo de execução", "tempo execucao", "tempo execução", "h.t.", "mão de obra", "mao de obra"];
-
-          for (const [k, v] of Object.entries(dadosObj)) {
-            const kLow = k.toLowerCase();
-            if (HORA_KEYS.some(hk => kLow.includes(hk))) {
-              const horas = parseFloat(String(v || "").replace(",", "."));
-              if (!isNaN(horas) && horas > 0 && horas <= 24) {
-                custoManutencaoCalc += Math.round(horas * valorHoraCentavos);
-                break;
-              }
-            }
-          }
-
-          // Peças com R$ declarado
-          const pecasArray = Array.isArray(pecasUtilizadas) ? pecasUtilizadas : [];
-          for (const peca of pecasArray) {
-            const pecaStr = typeof peca === "string" ? peca : JSON.stringify(peca);
-            const valorMatch = pecaStr.match(/R\$?\s*([\d.,]+)/i);
-            if (valorMatch) {
-              const valor = parseFloat(valorMatch[1].replace(/\./g, "").replace(",", "."));
-              if (!isNaN(valor) && valor > 0 && valor < 100000) custoManutencaoCalc += Math.round(valor * 100);
-            }
-          }
-
-          // Deslocamento GPS via Haversine
-          for (const [k, v] of Object.entries(dadosObj)) {
-            const kLow = k.toLowerCase();
-            if (kLow.includes("gps") || kLow.includes("localiz")) {
-              const coordMatch = String(v || "").match(/([-\d.]+),?\s*([-\d.]+)/);
-              if (coordMatch) {
-                const latDest = parseFloat(coordMatch[1]);
-                const lngDest = parseFloat(coordMatch[2]);
-                const latO = parseFloat(latOrigem);
-                const lngO = parseFloat(lngOrigem);
-                if (!isNaN(latDest) && !isNaN(lngDest)) {
-                  const R = 6371;
-                  const dLat = (latDest - latO) * Math.PI / 180;
-                  const dLng = (lngDest - lngO) * Math.PI / 180;
-                  const a = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(latO*Math.PI/180)*Math.cos(latDest*Math.PI/180)*Math.sin(dLng/2)*Math.sin(dLng/2);
-                  custoManutencaoCalc += Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)) * 2 * valorKmCentavos);
-                  break;
-                }
-              }
-            }
-          }
-        }
-      } catch (eCusto: any) {
-        console.warn("[Campo REST] Erro ao calcular custo:", eCusto.message);
-      }
-
-      // Inserir no histórico de manutenção do bem
-      if (finalEquipId) {
-        try {
-          const { bemManutencaoHistorico: bmh } = await import("../../drizzle/schema");
-          const tipoManutMap: Record<string, string> = {
-            corretiva: "corretiva", preventiva: "preventiva",
-            checklist_entrada: "checklist_entrada", checklist_saida: "checklist_saida",
-            inspecao: "liberacao_interna", instalacao: "corretiva", garantia: "corretiva",
-          };
-          await db.insert(bmh).values({
-            bemId: finalEquipId,
-            patrimonio: finalEquipPatrimonio || null,
-            tipoManutencao: (tipoManutMap[tipoOS] || "corretiva") as any,
-            data: new Date().toISOString().split("T")[0] as any,
-            tecnico: tecnico?.nome || "—",
-            cliente: ordem.clienteNome || null,
-            descricao: observacoes || null,
-            horimetro: horimetro || null,
-            custoManutencao: custoManutencaoCalc,
-            observacoes: pecasUtilizadas ? `Peças: ${JSON.stringify(pecasUtilizadas)}` : null,
-          } as any);
-        } catch (eBmh: any) {
-          console.warn("[Campo REST] Erro ao inserir histórico manutenção:", eBmh.message);
-        }
-      }
-
-      await db.insert(relatoriosAtendimento).values({
-        cliente: ordem.clienteNome || "—",
-        patrimonio: finalEquipPatrimonio || null,
-        modelo: finalEquipModelo || null,
-        data: new Date().toISOString().split("T")[0],
-        tipoServico: "Campo",
-        descricao: observacoes || null,
-        pecasUtilizadas: pecasUtilizadas ? JSON.stringify(pecasUtilizadas) : null,
-        tecnico: tecnico?.nome || "—",
-        status: "concluido",
-        fotos: fotos ? JSON.stringify(fotos) : null,
-        horimetro: horimetro || null,
-      });
-
-      console.log(`[Campo REST] Relatório criado para OS #${ordem.numero}, técnico ${crmUser.nome}`);
-      res.json({ success: true, id: result.insertId });
-    } catch (e: any) {
-      console.error("[Campo REST] Erro:", e.message);
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  // ── ENDPOINT REST PURO: submitRelatorioDireto ─────────────────────────────
-  app.post("/api/campo/submit-relatorio-direto", async (req, res) => {
-    try {
-      const bearerToken = req.headers?.["authorization"]?.replace("Bearer ", "").trim();
-      const token = bearerToken || req.cookies?.["crm_session"];
-      if (!token) return res.status(401).json({ error: "Não autenticado" });
-      const payload = await verificarToken(token);
-      if (!payload) return res.status(401).json({ error: "Token inválido" });
-      const crmUser = await buscarUsuarioPorId(payload.id);
-      if (!crmUser || !crmUser.ativo) return res.status(401).json({ error: "Usuário inativo" });
-
-      const input = req.body;
-      const { templateId, clienteNome, tipo, descricao, horimetro, observacoes,
-              dados, servicosRealizados, pecasUtilizadas, fotos,
-              assinaturaCliente, assinaturaTecnico,
-              equipamentoId, equipamentoPatrimonio, equipamentoModelo } = input;
-
-      if (!templateId || !clienteNome) return res.status(400).json({ error: "templateId e clienteNome são obrigatórios" });
-
-      const db = await getDb();
-      if (!db) return res.status(500).json({ error: "Banco indisponível" });
-
-      const { campoOrdens, campoRelatorios, crmUsers, relatoriosAtendimento } = await import("../../drizzle/schema");
-      const { sql: sqlDrizzle } = await import("drizzle-orm");
-      const { eq } = await import("drizzle-orm");
-
-      const [maxNum] = await db.execute(sqlDrizzle`SELECT COALESCE(MAX(numero), 0) as max FROM campo_ordens`);
-      const nextNum = ((maxNum as any)[0]?.max || 0) + 1;
-
-      const [osResult] = await db.insert(campoOrdens).values({
-        numero: nextNum,
-        tecnicoId: crmUser.id,
-        clienteNome,
-        equipamentoPatrimonio: equipamentoPatrimonio || null,
-        equipamentoModelo: equipamentoModelo || null,
-        equipamentoId: equipamentoId ? Number(equipamentoId) : null,
-        tipo: tipo || "corretiva",
-        prioridade: "media",
-        status: "concluida",
-        templateId: Number(templateId),
-        descricao: descricao || "Relatório criado diretamente pelo técnico",
-        dataAgendada: new Date().toISOString().split("T")[0],
-        dataInicio: new Date(),
-        dataConclusao: new Date(),
-      } as any);
-
-      const [relResult] = await db.insert(campoRelatorios).values({
-        ordemId: osResult.insertId,
-        tecnicoId: crmUser.id,
-        templateId: Number(templateId),
-        clienteNome,
-        equipamentoPatrimonio: equipamentoPatrimonio || null,
-        equipamentoModelo: equipamentoModelo || null,
-        dados: dados ? JSON.stringify(dados) : null,
-        fotos: fotos ? JSON.stringify(fotos) : null,
-        assinaturaCliente: assinaturaCliente || null,
-        assinaturaTecnico: assinaturaTecnico || null,
-        horimetro: horimetro || null,
-        pecasUtilizadas: pecasUtilizadas ? JSON.stringify(pecasUtilizadas) : null,
-        servicosRealizados: servicosRealizados ? JSON.stringify(servicosRealizados) : null,
-        observacoes: observacoes || null,
-        status: "enviado",
-        layoutRelatorio: "bg_service",
-      });
-
-      const [tecnico] = await db.select({ nome: crmUsers.nome }).from(crmUsers).where(eq(crmUsers.id, crmUser.id));
-      await db.insert(relatoriosAtendimento).values({
-        cliente: clienteNome,
-        patrimonio: equipamentoPatrimonio || null,
-        modelo: equipamentoModelo || null,
-        data: new Date().toISOString().split("T")[0],
-        tipoServico: "Campo",
-        descricao: observacoes || null,
-        pecasUtilizadas: pecasUtilizadas ? JSON.stringify(pecasUtilizadas) : null,
-        tecnico: tecnico?.nome || "—",
-        status: "concluido",
-        fotos: fotos ? JSON.stringify(fotos) : null,
-        horimetro: horimetro || null,
-      });
-
-      console.log(`[Campo REST] Relatório direto criado, técnico ${crmUser.nome}`);
-      res.json({ success: true, id: relResult.insertId, ordemId: osResult.insertId });
-    } catch (e: any) {
-      console.error("[Campo REST Direto] Erro:", e.message);
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  // tRPC API
-  app.use(
-    "/api/trpc",
-    createExpressMiddleware({
-      router: appRouter,
-      createContext,
-    })
-  );
-
-  // ── EMAIL TRACKING PIXEL ──────────────────────────────────────────────────
-  const TRACKING_PIXEL = Buffer.from(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
-    "base64"
-  );
-  app.get("/api/track/:trackingId.png", async (req, res) => {
-    try {
-      const { trackingId } = req.params;
-      if (trackingId && trackingId.length > 8) {
-        const db = await getDb();
-        if (db) {
-          const { sql: sqlDrizzle } = await import("drizzle-orm");
-          await db.execute(sqlDrizzle.raw(
-            `UPDATE emails_sent SET open_count = open_count + 1, opened_at = COALESCE(opened_at, NOW()) WHERE tracking_id = '${trackingId.replace(/'/g, "''")}'`
-          ));
-          console.log(`[Tracking] Email aberto: ${trackingId}`);
-        }
-      }
-    } catch (e: any) {
-      console.error("[Tracking] Erro:", e.message);
-    }
-    res.set({
-      "Content-Type": "image/png",
-      "Content-Length": String(TRACKING_PIXEL.length),
-      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
-      "Pragma": "no-cache",
-      "Expires": "0",
-    });
-    res.end(TRACKING_PIXEL);
-  });
-
-  // ── Health Check Endpoint ──────────────────────────────────────────────────────────────────
-  app.get("/api/health", (_req, res) => {
-    res.json({ status: "ok", uptime: process.uptime(), memory: process.memoryUsage().rss });
-  });
-
-  // ── Debug Endpoint for Patrimonio Matching (BEFORE Vite/static) ─────────────────────
-  app.get("/api/debug-patrimonio", async (_req, res) => {
-    try {
-      const db = await getDb();
-      if (!db) return res.json({ error: "No DB" });
-
-      const normPat = (s: string | null | undefined): string => {
-        if (!s) return "";
-        let v = s.trim().toLowerCase().replace(/[\s\-_./]+/g, "");
-        if (/^\d+$/.test(v)) v = v.replace(/^0+/, "") || "0";
-        return v;
-      };
-
-      const targets = (_req.query.pat as string || "6,20,29,30,01,11").split(",").map(s => s.trim());
-      const targetNorms = targets.map(t => normPat(t));
-
-      const allBens = await db.select({ id: bens.id, patrimonio: bens.patrimonio, modelo: bens.modelo, produttivoResourceId: bens.produttivoResourceId }).from(bens);
-      const targetBens = allBens.filter(b => targetNorms.includes(normPat(b.patrimonio)));
-
-      const allManut = await db.select({ id: bemManutencaoHistorico.id, bemId: bemManutencaoHistorico.bemId, patrimonio: bemManutencaoHistorico.patrimonio, data: bemManutencaoHistorico.data, produttivoFormFillId: bemManutencaoHistorico.produttivoFormFillId }).from(bemManutencaoHistorico);
-      const orphanManut = allManut.filter(m => m.bemId === 0);
-      const targetManut = allManut.filter(m => targetNorms.includes(normPat(m.patrimonio)));
-
-      const allCham = await db.select({ id: chamados.id, patrimonio: chamados.patrimonio, data: chamados.data, cliente: chamados.cliente }).from(chamados);
-      const targetCham = allCham.filter(c => targetNorms.includes(normPat(c.patrimonio)));
-
-      const allRel = await db.select({ id: relatoriosAtendimento.id, patrimonio: relatoriosAtendimento.patrimonio, data: relatoriosAtendimento.data }).from(relatoriosAtendimento);
-      const targetRel = allRel.filter(r => targetNorms.includes(normPat(r.patrimonio)));
-
-      const chamPatrimonios = [...new Set(allCham.map(c => c.patrimonio).filter(Boolean))];
-      const relPatrimonios = [...new Set(allRel.map(r => r.patrimonio).filter(Boolean))];
-      const manutPatrimonios = [...new Set(allManut.map(m => m.patrimonio).filter(Boolean))];
-
-      const allItems = await db.select({ id: contratoItens.id, contratoId: contratoItens.contratoId, bemId: contratoItens.bemId, nome: contratoItens.nome }).from(contratoItens);
-
-      res.json({
-        summary: { totalBens: allBens.length, totalManut: allManut.length, totalOrphans: orphanManut.length, totalChamados: allCham.length, totalRelatorios: allRel.length, totalContratoItems: allItems.length },
-        targetBens,
-        targetManutencoes: targetManut.map(m => ({ ...m, patNorm: normPat(m.patrimonio) })),
-        targetChamados: targetCham.map(c => ({ ...c, patNorm: normPat(c.patrimonio) })),
-        targetRelatorios: targetRel.map(r => ({ ...r, patNorm: normPat(r.patrimonio) })),
-        orphanSample: orphanManut.slice(0, 50).map(m => ({ ...m, patNorm: normPat(m.patrimonio) })),
-        uniquePatrimonios: { chamados: chamPatrimonios.sort(), relatorios: relPatrimonios.sort(), manutencoes: manutPatrimonios.sort() },
-        contratoItems: allItems,
-      });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message, stack: e.stack });
-    }
-  });
-
-  // ── Debug: Show resource_places and matching ──────────────────────────────────────
-  app.get("/api/debug-resource-places", async (_req, res) => {
-    try {
-      const produttivoLib = await import("../produttivo");
-      const db = await getDb();
-      if (!db) return res.json({ error: "No DB" });
-      const allPlaces = await produttivoLib.fetchAllEquipmentPlaces();
-      const allBensData = await db.select({ id: bens.id, patrimonio: bens.patrimonio, produttivoResourceId: bens.produttivoResourceId }).from(bens);
-      const normPat = (s: string | null | undefined): string => {
-        if (!s) return "";
-        let v = s.trim().toLowerCase().replace(/[\s\-_./]+/g, "");
-        if (/^\d+$/.test(v)) v = v.replace(/^0+/, "") || "0";
-        return v;
-      };
-      const places = allPlaces.map((p: any) => {
-        const linkedBem = allBensData.find(b => b.produttivoResourceId === p.id);
-        // Try extracting patrimonio from name
-        const parts = p.name?.trim().split(/\s+/) || [];
-        let extractedPat = null;
-        for (let i = parts.length - 1; i >= 0; i--) {
-          if (/^\d{1,3}$/.test(parts[i])) { extractedPat = parts[i]; break; }
-          if (/^[A-Za-z]{1,4}[-]?\d{1,3}$/.test(parts[i])) { extractedPat = parts[i]; break; }
-        }
-        return {
-          id: p.id, name: p.name, external_id: p.external_id,
-          extractedPat, extractedPatNorm: normPat(extractedPat),
-          linkedBemId: linkedBem?.id || null, linkedBemPat: linkedBem?.patrimonio || null,
-        };
-      });
-      // Also show unlinked bens
-      const unlinkedBens = allBensData.filter(b => !b.produttivoResourceId).map(b => ({ id: b.id, patrimonio: b.patrimonio, patNorm: normPat(b.patrimonio) }));
-      res.json({ totalPlaces: allPlaces.length, places, unlinkedBens });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message, stack: e.stack });
-    }
-  });
-
-  // ── Debug: Fetch raw form_fills from Produttivo API ──────────────────────────────────────
-  app.get("/api/debug-produttivo-raw", async (_req, res) => {
-    try {
-      const produttivoLib = await import("../produttivo");
-      const limit = parseInt(_req.query.limit as string || "5");
-      const formFills = await produttivoLib.fetchAllFormFills({
-        form_ids: [
-          ...produttivoLib.FORM_IDS_MANUTENCAO_INTERNA,
-          ...produttivoLib.FORM_IDS_CHECKLIST_ENTRADA_SAIDA,
-          ...produttivoLib.FORM_IDS_CHECKLIST_EQUIPAMENTOS,
-        ],
-      });
-      // Show first N form_fills with their title, resource_id, and field_values names
-      const sample = formFills.slice(0, limit).map((ff: any) => ({
-        ALL_KEYS: Object.keys(ff),
-        id: ff.id,
-        title: ff.title,
-        resource_id: ff.resource_id,
-        resource_place_id: ff.resource_place_id,
-        resource_place_name: ff.resource_place_name,
-        work_id: ff.work_id,
-        project_id: ff.project_id,
-        field_value_names: ff.field_values?.map((fv: any) => ({ name: fv.name, value: fv.value?.substring(0, 100), field_type: fv.field_type })) || [],
-      }));
-      // Also find form_fills that mention "020" or "029" or "030" in title or field_values
-      const searchPats = (_req.query.search as string || "020,029,030,006").split(",");
-      const matching = formFills.filter(ff => {
-        const allText = [ff.title, ...ff.field_values.map(fv => fv.value || "")].join(" ").toLowerCase();
-        return searchPats.some(p => allText.includes(p.toLowerCase()));
-      }).slice(0, 20).map(ff => ({
-        id: ff.id,
-        title: ff.title,
-        resource_id: ff.resource_id,
-        field_values: ff.field_values.filter(fv => fv.value).map(fv => ({ name: fv.name, value: fv.value?.substring(0, 200) })),
-      }));
-      res.json({
-        totalFormFills: formFills.length,
-        sample,
-        matchingSearch: matching,
-      });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message, stack: e.stack });
-    }
-  });
-
-  // ── Sync Resource Places: Re-extract patrimônios and link bens to resource_places ──────────────
-  app.post("/api/sync-resource-places", async (_req, res) => {
-    try {
-      const produttivoLib = await import("../produttivo");
-      const db = await getDb();
-      if (!db) return res.json({ error: "No DB" });
-      // Import the extractPatrimonioFromAssetName function from produttivo router
-      const { extractPatrimonioFromAssetName } = await import("../routers/produttivo");
-      
-      // Fetch all resource_places from Produttivo
-      const allPlaces = await produttivoLib.fetchAllEquipmentPlaces();
-      // Fetch all bens from CRM
-      const allBens = await db.select({
-        id: bens.id,
-        patrimonio: bens.patrimonio,
-        nome: bens.nome,
-        modelo: bens.modelo,
-        serialNumber: bens.serialNumber,
-        produttivoResourceId: bens.produttivoResourceId,
-      }).from(bens);
-      
-      const normPatFn = (s: string | null | undefined): string => {
-        if (!s) return "";
-        let v = s.trim().toLowerCase().replace(/[\s\-_./]+/g, "");
-        if (/^\d+$/.test(v)) v = v.replace(/^0+/, "") || "0";
-        return v;
-      };
-      
-      let linked = 0, alreadyLinked = 0, notFound = 0;
-      const details: any[] = [];
-      
-      for (const place of allPlaces) {
-        const jaVinculado = allBens.find(b => b.produttivoResourceId === place.id);
-        if (jaVinculado) { alreadyLinked++; continue; }
-        
-        const placeName = normPatFn(place.name);
-        const placeExtId = normPatFn(place.external_id);
-        const placeExtractedPat = extractPatrimonioFromAssetName(place.name);
-        const placeExtractedPatNorm = placeExtractedPat ? normPatFn(placeExtractedPat) : "";
-        
-        let bestBem: typeof allBens[0] | null = null;
-        for (const b of allBens) {
-          if (b.produttivoResourceId) continue;
-          const bPat = normPatFn(b.patrimonio);
-          if (!bPat) continue;
-          if (placeExtId && placeExtId === bPat) { bestBem = b; break; }
-          if (placeName === bPat) { bestBem = b; break; }
-          if (placeExtractedPatNorm && placeExtractedPatNorm === bPat) { bestBem = b; break; }
-          if (bPat.length >= 4 && placeName.includes(bPat)) { bestBem = b; break; }
-        }
-        
-        if (bestBem) {
-          await db.update(bens).set({ produttivoResourceId: place.id }).where(eq(bens.id, bestBem.id));
-          bestBem.produttivoResourceId = place.id;
-          linked++;
-          details.push({ placeName: place.name, placeId: place.id, extractedPat: placeExtractedPat, extractedPatNorm: placeExtractedPatNorm, bemId: bestBem.id, bemPat: bestBem.patrimonio });
-        } else {
-          notFound++;
-          if (placeExtractedPatNorm) {
-            details.push({ placeName: place.name, placeId: place.id, extractedPat: placeExtractedPat, extractedPatNorm: placeExtractedPatNorm, bemId: null, status: 'not_found' });
-          }
-        }
-      }
-      
-      res.json({ success: true, linked, alreadyLinked, notFound, totalPlaces: allPlaces.length, details });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message, stack: e.stack });
-    }
-  });
-
-  // ── Fix Orphans: Link orphan manutenções to bens via resource_place_id API ──────────────
-  app.post("/api/fix-orphans", async (_req, res) => {
-    try {
-      const produttivoLib = await import("../produttivo");
-      const { extractPatrimonioFromAssetName } = await import("../routers/produttivo");
-      const db = await getDb();
-      if (!db) return res.json({ error: "No DB" });
-
-      // 1. Get all bens
-      const allBensData = await db.select({ id: bens.id, patrimonio: bens.patrimonio, produttivoResourceId: bens.produttivoResourceId }).from(bens);
-      const bensWithRP = allBensData.filter(b => b.produttivoResourceId);
-
-      // 2. Normalizar patrimônio
-      const normPat = (s: string | null) => {
-        if (!s) return '';
-        let v = s.trim().toLowerCase().replace(/[\s\-_./]+/g, '');
-        if (/^\d+$/.test(v)) v = v.replace(/^0+/, '') || '0';
-        return v;
-      };
-
-      // 3. Construir mapa patNorm → bemId (para vincular resource_places duplicados)
-      const patToBemId = new Map<string, number>();
-      for (const b of allBensData) {
-        const pn = normPat(b.patrimonio);
-        if (pn) patToBemId.set(pn, b.id);
-      }
-
-      // 4. Buscar TODOS os resource_places e agrupar por patrimônio
-      const allPlaces = await produttivoLib.fetchAllEquipmentPlaces();
-      const patToRPIds = new Map<string, number[]>();
-      for (const place of allPlaces) {
-        const pat = extractPatrimonioFromAssetName(place.name);
-        if (pat) {
-          const pn = normPat(pat);
-          if (!patToRPIds.has(pn)) patToRPIds.set(pn, []);
-          patToRPIds.get(pn)!.push(place.id);
-        }
-      }
-
-      // 5. Para cada bem, buscar form_fills de TODOS os resource_places com mesmo patrimônio
-      const ffIdToBemId = new Map<number, number>();
-      let apiCalls = 0;
-      const processedRPIds = new Set<number>();
-
-      for (const bem of allBensData) {
-        const pn = normPat(bem.patrimonio);
-        if (!pn) continue;
-        const rpIds = patToRPIds.get(pn) || [];
-        // Adicionar o resource_place vinculado diretamente
-        if (bem.produttivoResourceId && !rpIds.includes(bem.produttivoResourceId)) {
-          rpIds.push(bem.produttivoResourceId);
-        }
-        for (const rpId of rpIds) {
-          if (processedRPIds.has(rpId)) continue;
-          processedRPIds.add(rpId);
-          try {
-            const rpFFs = await produttivoLib.fetchAllFormFills({ resource_place_ids: [rpId] });
-            apiCalls++;
-            for (const ff of rpFFs) {
-              ffIdToBemId.set(ff.id, bem.id);
-            }
-          } catch (e) {
-            console.error(`fix-orphans: error for bem ${bem.id} rp ${rpId}:`, e);
-          }
-        }
-      }
-
-      // 6. Get all orphan manutenções (bemId = 0 or null)
-      const allManut = await db.select({ id: bemManutencaoHistorico.id, bemId: bemManutencaoHistorico.bemId, produttivoFormFillId: bemManutencaoHistorico.produttivoFormFillId }).from(bemManutencaoHistorico);
-      const orphans = allManut.filter(m => !m.bemId || m.bemId === 0);
-
-      // 7. Update orphans that have a matching form_fill
-      let fixed = 0;
-      for (const orphan of orphans) {
-        if (orphan.produttivoFormFillId && ffIdToBemId.has(orphan.produttivoFormFillId)) {
-          const newBemId = ffIdToBemId.get(orphan.produttivoFormFillId)!;
-          await db.update(bemManutencaoHistorico).set({ bemId: newBemId }).where(eq(bemManutencaoHistorico.id, orphan.id));
-          fixed++;
-        }
-      }
-
-      res.json({ success: true, apiCalls, totalResourcePlaces: processedRPIds.size, totalFormFillsMapped: ffIdToBemId.size, totalOrphans: orphans.length, fixed });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message, stack: e.stack });
-    }
-  });
-
-  // ── RE-SYNC CHAMADOS (limpa e reimporta com resource_id fallback) ──
-  app.post("/api/resync-chamados", async (_req, res) => {
-    try {
-      const produttivoLib = await import("../produttivo");
-      const { extractPatrimonioFromAssetName } = await import("../routers/produttivo");
-      const db = await getDb();
-      if (!db) return res.json({ error: "No DB" });
-
-      // 1. Deletar chamados importados do Produttivo
-      const deleted = await db.delete(chamados).where(isNotNull(chamados.produttivoId));
-
-      // 2. Construir mapa resource_id → patrimônio
-      const rpIdToPat = new Map<number, string>();
-      const allPlaces = await produttivoLib.fetchAllEquipmentPlaces();
-      for (const place of allPlaces) {
-        const pat = extractPatrimonioFromAssetName(place.name);
-        if (pat) rpIdToPat.set(place.id, pat);
-      }
-
-      // 3. Buscar todos form_fills de chamado externo
-      const allFF = await produttivoLib.fetchAllFormFills({
-        form_ids: produttivoLib.FORM_IDS_CHAMADO_EXTERNO,
-      });
-
-      // Helper para extrair campo
-      const extractField = (fvs: any[], pattern: string) => {
-        const fv = fvs.find((f: any) => f.name?.toLowerCase().includes(pattern.toLowerCase()));
-        return fv?.value ?? null;
-      };
-
-      let imported = 0;
-      let withResourceFallback = 0;
-      let withoutPat = 0;
-      for (const ff of allFF) {
-        const mesAno = (() => { const d = new Date(ff.device_created_at || ff.created_at); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; })();
-        const dataStr = (ff.device_created_at || ff.created_at).split('T')[0];
-        const cliente = ff.title || extractField(ff.field_values, 'cliente');
-
-        // Extrair patrimônio dos field_values
-        let patrimonio: string | null = null;
-        const patField = extractField(ff.field_values, 'patrimônio') || extractField(ff.field_values, 'patrimonio');
-        if (patField) {
-          const parts = patField.trim().split(/\s+/);
-          if (parts.length >= 1 && /^\d{1,3}$/.test(parts[0])) patrimonio = parts[0];
-        }
-        if (!patrimonio) {
-          const nomeAtivo = extractField(ff.field_values, 'nome');
-          if (nomeAtivo) patrimonio = extractPatrimonioFromAssetName(nomeAtivo);
-        }
-        if (!patrimonio && ff.title) {
-          const afterGt = ff.title.split('>').pop()?.trim();
-          if (afterGt) patrimonio = extractPatrimonioFromAssetName(afterGt);
-        }
-        // Fallback: resource_id
-        if (!patrimonio && ff.resource_id) {
-          patrimonio = rpIdToPat.get(ff.resource_id) || null;
-          if (patrimonio) withResourceFallback++;
-        }
-        if (!patrimonio) withoutPat++;
-
-        const modelo = extractField(ff.field_values, 'modelo') || extractField(ff.field_values, 'máquina');
-        const horimetro = extractField(ff.field_values, 'horímetro') || extractField(ff.field_values, 'horimetro');
-        const falha = extractField(ff.field_values, 'falha') || extractField(ff.field_values, 'defeito');
-        const tecnico = extractField(ff.field_values, 'técnico') || extractField(ff.field_values, 'tecnico');
-
-        try {
-          await db.insert(chamados).values({
-            mesAno, cliente, patrimonio, modelo, horimetro,
-            data: dataStr as any, falha, tecnico, custoManutencao: 0,
-            produttivoId: String(ff.id), produttivoSync: new Date(),
-          });
-          imported++;
-        } catch { /* skip duplicates */ }
-      }
-
-      res.json({ success: true, totalFormFills: allFF.length, imported, withResourceFallback, withoutPat, resourcePlaces: rpIdToPat.size });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message, stack: e.stack });
-    }
-  });
-
-  // ── UPDATE ITENS VERIFICADOS (preenche itensVerificados para registros existentes) ──
-  app.post("/api/update-itens-verificados", async (_req, res) => {
-    try {
-      const produttivoLib = await import("../produttivo");
-      const db = await getDb();
-      if (!db) return res.json({ error: "No DB" });
-
-      // Buscar registros sem itensVerificados
-      const records = await db.select({
-        id: bemManutencaoHistorico.id,
-        ffId: bemManutencaoHistorico.produttivoFormFillId,
-        itens: bemManutencaoHistorico.itensVerificados,
-      }).from(bemManutencaoHistorico).where(isNotNull(bemManutencaoHistorico.produttivoFormFillId));
-
-      const needsUpdate = records.filter(r => !r.itens || r.itens === '[]' || r.itens === 'null');
-      
-      // Buscar todos form_fills do Produttivo
-      const allFF = await produttivoLib.fetchAllFormFills({});
-      const ffMap = new Map<number, any>();
-      for (const ff of allFF) ffMap.set(ff.id, ff);
-
-      let updated = 0;
-      for (const rec of needsUpdate) {
-        const ff = ffMap.get(rec.ffId!);
-        if (!ff || !ff.field_values?.length) continue;
-        const itensJson = JSON.stringify(ff.field_values.map((fv: any) => ({
-          nome: fv.name, valor: fv.value, tipo: fv.field_type,
-        })));
-        await db.update(bemManutencaoHistorico)
-          .set({ itensVerificados: itensJson })
-          .where(eq(bemManutencaoHistorico.id, rec.id));
-        updated++;
-      }
-
-      res.json({ success: true, totalRecords: records.length, needsUpdate: needsUpdate.length, updated });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message, stack: e.stack });
-    }
-  });
-
-  // ── PUBLIC WEBHOOK: Receive leads from external sites ──────────────────────
-  app.post("/api/webhook/lead", async (req, res) => {
-    try {
-      // CORS headers for cross-origin requests from external sites
-      res.set({
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
-      });
-
-      const {
-        nome, telefone, email, empresa, cnpj, equipamento, mensagem,
-        origem, pipeline, // 'locacao_ativo' or 'bg_vendas_pecas'
-        pagina, // URL da página de origem
-      } = req.body || {};
-
-      if (!nome && !telefone && !email) {
-        return res.status(400).json({ error: "Informe pelo menos nome, telefone ou email" });
-      }
-
-      const db = await getDb();
-      if (!db) return res.status(500).json({ error: "Database not available" });
-
-      // Determine pipeline type and initial stage
-      const pipelineType = pipeline === "bg_vendas_pecas" ? "bg_vendas_pecas" : "locacao_ativo";
-      const etapaInicial = pipelineType === "bg_vendas_pecas" ? "lead_entrada" : "elaborar_proposta";
-
-      // Build title
-      const titulo = equipamento
-        ? `[Site] ${nome || "Lead"} - ${equipamento}`
-        : `[Site] ${nome || "Lead"} - Orçamento`;
-
-      // Build observacoes with all info
-      const obs: string[] = [];
-      if (pagina) obs.push(`Página: ${pagina}`);
-      if (equipamento) obs.push(`Equipamento: ${equipamento}`);
-      if (cnpj) obs.push(`CNPJ: ${cnpj}`);
-      if (empresa) obs.push(`Empresa: ${empresa}`);
-      if (mensagem) obs.push(`Mensagem: ${mensagem}`);
-      obs.push(`Recebido em: ${new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}`);
-
-      const [result] = await db.insert(pipelineOportunidades).values({
-        pipelineType: pipelineType as any,
-        titulo,
-        clienteNome: nome || null,
-        clienteEmpresa: empresa || null,
-        clienteTelefone: telefone || null,
-        clienteEmail: email || null,
-        etapa: etapaInicial,
-        valor: 0,
-        probabilidade: 0,
-        origem: origem || "site",
-        observacoes: obs.join("\n"),
-      });
-
-      // Add timeline entry
-      try {
-        await db.insert(oportunidadeTimeline).values({
-          oportunidadeId: result.insertId,
-          tipo: "criacao",
-          titulo: "Lead recebido via site",
-          descricao: `Lead "${nome || 'Anônimo'}" recebido de ${origem || pagina || 'site externo'}`,
-          criadoPorNome: "Sistema (Webhook)",
-        });
-      } catch (e) { /* ignore timeline errors */ }
-
-      console.log(`[Webhook Lead] Nova oportunidade #${result.insertId} no pipeline ${pipelineType} de ${origem || 'site'}`);
-      res.json({ success: true, id: result.insertId });
-    } catch (e: any) {
-      console.error("[Webhook Lead] Erro:", e.message);
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  // CORS preflight for webhook
-  app.options("/api/webhook/lead", (_req, res) => {
-    res.set({
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-    });
-    res.sendStatus(204);
-  });
-
-  // ── WhatsApp Agent Diagnostic Endpoint ──────────────────
-  // ── QR Code JSON (para o frontend do CRM) ───────────────────────────────
-  // QR Code endpoints - Z-API manages connection via their dashboard (app.z-api.io)
-  app.get("/api/whatsapp/qrcode-data", async (_req, res) => {
-    const zapiInstanceId = process.env.ZAPI_INSTANCE_ID ?? '';
-    const zapiToken = process.env.ZAPI_TOKEN ?? '';
-    const zapiClientToken = process.env.ZAPI_CLIENT_TOKEN ?? '';
-    try {
-      const r = await fetch(`https://api.z-api.io/instances/${zapiInstanceId}/token/${zapiToken}/status`, {
-        headers: { 'Client-Token': zapiClientToken },
-      });
-      const data = await r.json().catch(() => ({}));
-      if (data?.connected) {
-        return res.json({ base64: null, status: 'open', connected: true });
-      }
-      res.json({ base64: null, status: 'disconnected', connected: false, message: 'Reconecte via app.z-api.io' });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.get("/api/whatsapp/qrcode", async (_req, res) => {
-    res.send(`<!DOCTYPE html><html><head><title>WhatsApp BG Service</title>
-    <style>body{background:#111;color:white;font-family:sans-serif;text-align:center;padding:40px}
-    a{color:#4fc3f7;font-size:18px}</style></head><body>
-    <h2>📱 WhatsApp BG Service</h2>
-    <p>A conexão WhatsApp é gerenciada via Z-API.</p>
-    <a href="https://app.z-api.io" target="_blank">Acessar painel Z-API para reconectar</a>
-    </body></html>`);
-  });
-
-  app.get("/api/whatsapp/diag", async (_req, res) => {
-    const { ENV } = await import("./env");
-    const hasForgeKey = !!(ENV.forgeApiKey && ENV.forgeApiKey.length > 5);
-    const hasForgeUrl = !!(ENV.forgeApiUrl && ENV.forgeApiUrl.length > 5);
-    const zapiInstanceId = process.env.ZAPI_INSTANCE_ID ?? '';
-    const zapiToken = process.env.ZAPI_TOKEN ?? '';
-    const zapiClientToken = process.env.ZAPI_CLIENT_TOKEN ?? '';
-    const hasZapiToken = zapiClientToken.length > 5;
-    let zapiStatus = 'unknown';
-    try {
-      const r = await fetch(`https://api.z-api.io/instances/${zapiInstanceId}/token/${zapiToken}/status`, { headers: { 'Client-Token': zapiClientToken } });
-      const d = await r.json().catch(() => ({}));
-      zapiStatus = r.ok ? (d?.connected ? 'connected' : 'disconnected') : 'error-' + r.status;
-    } catch (e: any) { zapiStatus = 'fetch-error: ' + e.message; }
-    let llmStatus = 'unknown';
-    try {
-      const { invokeLLM } = await import("./llm");
-      const r = await invokeLLM({ messages: [{ role: 'user', content: 'Diga apenas: OK' }] });
-      llmStatus = r?.choices?.[0]?.message?.content ? 'ok' : 'no-content';
-    } catch (e: any) { llmStatus = 'error: ' + e.message?.substring(0, 200); }
-    res.json({
-      llm: { hasKey: hasForgeKey, hasUrl: hasForgeUrl, status: llmStatus },
-      zapi: { instanceId: zapiInstanceId, hasToken: hasZapiToken, status: zapiStatus },
-    });
-  });
-
-  // ── WhatsApp Agent Webhook (Evolution API / BG Service) ──────────────────
-  // Debug endpoint to view last webhook payloads
-  const lastWebhookPayloads: any[] = [];
-  app.get("/api/whatsapp/webhook-debug", async (req, res) => {
-    res.json({ count: lastWebhookPayloads.length, payloads: lastWebhookPayloads });
-  });
-
-  // Reset all agent sessions to bot mode (clears human_takeover)
-  app.post("/api/whatsapp/reset-sessions", async (req, res) => {
-    try {
-      const db = await getDb();
-      await db.update(agentSessions).set({ status: 'bot', pausedUntil: null as any, assignedTo: null as any });
-      res.json({ ok: true, message: 'All sessions reset to bot mode' });
-    } catch (err: any) {
-      res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
-
-  // View current sessions
-  app.get("/api/whatsapp/sessions", async (req, res) => {
-    try {
-      const db = await getDb();
-      const sessions = await db.select({
-        phoneNumber: agentSessions.phoneNumber,
-        status: agentSessions.status,
-        pausedUntil: agentSessions.pausedUntil,
-        assignedTo: agentSessions.assignedTo,
-        contactName: agentSessions.contactName,
-        lastMessageAt: agentSessions.lastMessageAt,
-      }).from(agentSessions).orderBy(desc(agentSessions.updatedAt)).limit(20);
-      res.json(sessions);
-    } catch (err: any) {
-      res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
-
-  // ── Endpoint de teste: força runFollowups agora + mostra pendentes ────────
-  app.post("/api/followup/run-now", async (req, res) => {
-    try {
-      const db = await getDb();
-      if (!db) return res.status(500).json({ error: "DB unavailable" });
-
-      // Conta pendentes antes
-      const [{ total: antes }] = await db.execute<{ total: number }>(
-        `SELECT COUNT(*) as total FROM agent_followups WHERE status = 'pending'` as any
-      );
-
-      const { runFollowups } = await import("../routers/whatsappAgent");
-      await runFollowups();
-
-      // Conta pendentes depois + mostra últimos enviados
-      const [{ total: depois }] = await db.execute<{ total: number }>(
-        `SELECT COUNT(*) as total FROM agent_followups WHERE status = 'pending'` as any
-      );
-
-      const recentes = await db.execute(
-        `SELECT id, phone_number, canal, proposta_id, status, scheduled_at, sent_at,
-                LEFT(message_template, 60) as msg
-         FROM agent_followups
-         ORDER BY updated_at DESC
-         LIMIT 10` as any
-      );
-
-      res.json({
-        ok: true,
-        pendenteAntes: Number(antes),
-        pendenteDepois: Number(depois),
-        enviados: Number(antes) - Number(depois),
-        recentes,
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
-
-  // ── Endpoint de teste: lista follow-ups pendentes por proposta ──────────
-  app.get("/api/followup/pending", async (req, res) => {
-    try {
-      const db = await getDb();
-      if (!db) return res.status(500).json({ error: "DB unavailable" });
-      const rows = await db.execute(
-        `SELECT id, phone_number, canal, proposta_id, type, status,
-                scheduled_at, sent_at, attempts,
-                LEFT(message_template, 80) as msg
-         FROM agent_followups
-         WHERE status IN ('pending', 'sent')
-         ORDER BY created_at DESC
-         LIMIT 30` as any
-      );
-      res.json(rows);
-    } catch (err: any) {
-      res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
-
-  // ── Webhook Z-API ──────────────────────────────────────────────────────────
-  function convertZApiToInternal(body: any): any {
-    // Ignorar mensagens enviadas pelo bot
-    if (body.fromMe === true) return null;
-    if (body.type === 'SentCallback') return null;
-
-    // Aceitar ReceivedCallback E outros tipos de entrada (contas Business, grupos, etc.)
-    const allowedTypes = ['ReceivedCallback', 'MessageCallback', 'received'];
-    const bodyType = (body.type || '').toLowerCase();
-    const isReceived = allowedTypes.some(t => t.toLowerCase() === bodyType) || 
-                       (!body.fromMe && body.phone && body.momment);
-    if (!isReceived) return null;
-
-    const phone = (body.phone || body.chatId || '').replace(/\D/g, '') || '';
-    if (!phone || phone.length < 8) return null;
-
-    const pushName = body.senderName || body.notifyName || body.pushname || '';
-    const msgId = body.messageId || body.id || String(body.momment || Date.now());
-    const ts = Math.floor((body.momment || Date.now()) / 1000);
-    const text = body.text?.message || body.caption || '';
-
-    return {
-      event: 'messages.upsert',
-      instance: 'BG-Service',
-      data: {
-        key: { remoteJid: phone + '@s.whatsapp.net', fromMe: false, id: msgId },
-        message: { conversation: text },
-        messageTimestamp: ts,
-        pushName,
-        // Todos os tipos de mídia
-        audio: body.audio || null,
-        image: body.image || null,
-        video: body.video || null,
-        document: body.document || null,
-        sticker: body.sticker || null,
-        mediaType: body.audio ? 'audio'
-          : body.image ? 'image'
-          : body.video ? 'video'
-          : body.document ? 'document'
-          : body.sticker ? 'sticker'
-          : 'text',
-      },
-    };
-  }
-
-  app.post("/api/whatsapp/webhook", async (req, res) => {
-    res.status(200).json({ ok: true });
-    try {
-      lastWebhookPayloads.unshift({
-        receivedAt: new Date().toISOString(),
-        rawBody: JSON.stringify(req.body).substring(0, 5000),
-      });
-      if (lastWebhookPayloads.length > 10) lastWebhookPayloads.pop();
-
-      console.log("[WEBHOOK-ZAPI] Recebido tipo:", req.body?.type, "phone:", req.body?.phone);
-      const payload = convertZApiToInternal(req.body);
-      if (!payload) {
-        console.log("[WEBHOOK-ZAPI] Ignorando evento:", req.body?.type);
-        return;
-      }
-      console.log("[WEBHOOK-ZAPI] Processando mensagem de:", payload.data.key.remoteJid);
-      const { handleWhatsAppWebhook } = await import("../routers/whatsappAgent");
-      handleWhatsAppWebhook(payload).catch((err: unknown) =>
-        console.error("[WEBHOOK-ZAPI] Erro no agente:", err)
-      );
-    } catch (err) {
-      console.error("[WEBHOOK-ZAPI] Erro:", String(err));
-    }
-  });
-
-  console.log('[WEBHOOK-ZAPI] Webhook Z-API configurado em /api/whatsapp/webhook');
-
-  // Follow-up automático a cada 30 min
-  setInterval(async () => {
-    try {
-      const { runFollowups } = await import("../routers/whatsappAgent");
-      await runFollowups();
-    } catch (err) { console.error("[FOLLOWUP]", err); }
-  }, 30 * 60 * 1000);
-
-
-  // development mode uses Vite, production mode uses static files
-  if (process.env.NODE_ENV === "development") {
-    await setupVite(app, server);
-  } else {
-    serveStatic(app);
-  }
-
-  // ── Global Express Error Handler (prevents server crash from unhandled route errors) ──
-  app.use((err: any, _req: any, res: any, _next: any) => {
-    console.error("[Express Error]", err?.message || err);
-    if (err?.stack) console.error(err.stack);
-    if (!res.headersSent) {
-      res.status(500).json({ error: "Internal server error", message: err?.message || "Unknown error" });
-    }
-  });
-
-  const preferredPort = parseInt(process.env.PORT || "3000");
-  const port = await findAvailablePort(preferredPort);
-
-  if (port !== preferredPort) {
-    console.log(`Port ${preferredPort} is busy, using port ${port} instead`);
-  }
-
-  server.listen(port, () => {
-    console.log(`Server running on http://localhost:${port}/`);
-  });
-
-  // ── Graceful Shutdown ──────────────────────────────────────────────────────
-
-  const shutdown = (signal: string) => {
-    console.log(`[Shutdown] Received ${signal}, closing server...`);
-    server.close(() => {
-      console.log("[Shutdown] Server closed gracefully");
-      process.exit(0);
-    });
-    // Force exit after 10 seconds if graceful shutdown fails
-    setTimeout(() => {
-      console.error("[Shutdown] Forced exit after timeout");
-      process.exit(1);
-    }, 10000);
-  };
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("SIGINT", () => shutdown("SIGINT"));
-}
-
-startServer().catch(console.error);
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;background:var(--bg-deep);font-family:var(--F);color:var(--text);overscroll-behavior:none;overflow:hidden}
+#app{height:100%;display:flex;flex-direction:column;max-width:430px;margin:0 auto;position:relative;overflow:hidden;background:var(--bg-base)}
+
+/* LOADER */
+#loader{position:fixed;inset:0;background:var(--bg-deep);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999;gap:16px;transition:opacity .3s}
+.ldr-logo{font-size:32px;font-weight:800;letter-spacing:-1px}
+.ldr-logo span{color:var(--orange)}
+.ldr-sub{font-size:12px;font-family:var(--FM);color:var(--text-3);letter-spacing:2px}
+.spin{width:28px;height:28px;border:2.5px solid var(--border);border-top-color:var(--orange);border-radius:50%;animation:spin .7s linear infinite;margin-top:8px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* OFFLINE BADGE */
+#offline-bar{position:fixed;top:0;left:0;right:0;z-index:200;background:var(--yellow);color:#000;font-size:12px;font-weight:700;text-align:center;padding:6px;font-family:var(--FM);transform:translateY(-100%);transition:transform .3s}
+#offline-bar.show{transform:translateY(0)}
+
+/* SYNC BADGE */
+#sync-badge{position:fixed;top:8px;right:8px;z-index:150;background:var(--orange);color:#fff;font-size:10px;font-weight:700;padding:4px 8px;border-radius:20px;font-family:var(--FM);display:none;align-items:center;gap:4px}
+#sync-badge.show{display:flex}
+
+/* HEADER */
+.hdr{position:sticky;top:0;z-index:100;background:var(--bg-base);border-bottom:1px solid var(--border);height:var(--hdr-h);display:flex;align-items:center;padding:0 16px;gap:10px;flex-shrink:0}
+.hdr-back{background:none;border:none;color:var(--text);cursor:pointer;padding:4px;margin-left:-4px;display:flex;align-items:center}
+.hdr-title{font-size:17px;font-weight:700;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.2px}
+.hdr-chip{font-family:var(--FM);font-size:10px;color:var(--orange);background:var(--orange-dim);border:1px solid var(--orange-bdr);border-radius:6px;padding:2px 8px;white-space:nowrap}
+
+/* CONTENT */
+.content{flex:1;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding-bottom:calc(var(--nav-h) + 8px)}
+.content.full{padding-bottom:0}
+.pad{padding:16px}
+
+/* NAV */
+.nav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:var(--bg-base);border-top:1px solid var(--border);height:var(--nav-h);display:flex;align-items:flex-start;padding:8px 4px env(safe-area-inset-bottom,0);z-index:100}
+.nav-btn{flex:1;background:none;border:none;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:3px;padding:4px 2px;color:var(--text-3);transition:color .15s}
+.nav-btn.on{color:var(--orange)}
+.nav-btn svg{width:22px;height:22px}
+.nav-btn span{font-size:10px;font-weight:600;letter-spacing:.3px}
+.nav-dot{position:absolute;top:2px;right:2px;width:6px;height:6px;background:var(--red);border-radius:50%;display:none}
+.nav-dot.show{display:block}
+
+/* CARD */
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
+.card-b{padding:14px 16px}
+.csm{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--rs)}
+
+/* BADGE */
+.badge{display:inline-flex;align-items:center;font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;font-family:var(--FM);letter-spacing:.3px;white-space:nowrap}
+.b-blue{background:var(--blue-dim);color:var(--blue)}
+.b-orange{background:var(--orange-dim);color:var(--orange)}
+.b-green{background:var(--green-dim);color:var(--green)}
+.b-red{background:var(--red-dim);color:var(--red)}
+.b-gray{background:rgba(255,255,255,.06);color:var(--text-2)}
+.b-yellow{background:var(--yellow-dim);color:var(--yellow)}
+
+/* STATS */
+.stats-g{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.stat{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r);padding:16px 12px;text-align:center}
+.stat-ico{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;margin:0 auto 8px}
+.ico-blue{background:var(--blue-dim)} .ico-orange{background:var(--orange-dim)} .ico-green{background:var(--green-dim)}
+.stat-n{font-size:28px;font-weight:800;line-height:1;font-family:var(--FM)}
+.stat-l{font-size:11px;color:var(--text-3);margin-top:4px;font-weight:500}
+
+/* OS CARD */
+.os-card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px;text-align:left;width:100%;cursor:pointer;transition:background .12s,transform .1s;position:relative;border-left-width:3px}
+.os-card:active{background:var(--bg-card-hover);transform:scale(.99)}
+.os-num{font-family:var(--FM);font-size:11px;color:var(--text-3);margin-bottom:3px}
+.os-cli{font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:90px}
+.os-meta{display:flex;align-items:center;gap:6px;margin-top:5px;flex-wrap:wrap}
+.os-addr{font-size:11px;color:var(--text-3);display:flex;align-items:center;gap:3px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.os-right{position:absolute;top:14px;right:14px;display:flex;flex-direction:column;gap:4px;align-items:flex-end}
+.p-urg{border-left-color:var(--red)} .p-alta{border-left-color:var(--orange)} .p-media{border-left-color:var(--blue)} .p-baixa{border-left-color:transparent}
+
+/* SECTION TITLE */
+.sec-ttl{font-size:12px;font-weight:700;color:var(--text-3);letter-spacing:.8px;text-transform:uppercase;margin-bottom:10px;display:flex;align-items:center;gap:6px}
+
+/* BUTTONS */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;font-family:var(--F);font-weight:700;font-size:15px;border:none;border-radius:var(--r);cursor:pointer;padding:0 20px;height:52px;width:100%;transition:opacity .15s,transform .1s}
+.btn:active{transform:scale(.98)} .btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-or{background:var(--orange);color:#fff}
+.btn-gr{background:var(--green);color:#0a1628}
+.btn-bl{background:var(--blue);color:#fff}
+.btn-gh{background:var(--bg-card);border:1px solid var(--border);color:var(--text)}
+.btn-dn{background:var(--red-dim);border:1px solid rgba(255,68,85,.3);color:var(--red)}
+.btn-sm{height:38px;font-size:13px;border-radius:var(--rs)}
+
+/* FORM */
+.fg{display:flex;flex-direction:column;gap:6px}
+.lbl{font-size:11px;font-weight:600;color:var(--text-3);letter-spacing:.4px;text-transform:uppercase}
+.inp,.txta,.sel{background:var(--bg-card);border:1px solid var(--border);color:var(--text);font-family:var(--F);font-size:15px;border-radius:var(--rs);padding:12px 14px;width:100%;outline:none;transition:border-color .15s;-webkit-appearance:none}
+.inp:focus,.txta:focus,.sel:focus{border-color:var(--orange)}
+.inp::placeholder,.txta::placeholder{color:var(--text-3)}
+.txta{resize:none;min-height:88px}
+.sel{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%234a5a7a' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:36px}
+.sel option{background:#0d1e35;color:#f0f4ff}
+
+/* SWITCH */
+.sw-row{display:flex;align-items:center;justify-content:space-between;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--rs);padding:12px 14px}
+.sw-lbl{font-size:14px;color:var(--text);flex:1}
+.sw{position:relative;width:44px;height:26px;flex-shrink:0}
+.sw input{opacity:0;width:0;height:0;position:absolute}
+.sw-track{position:absolute;inset:0;background:rgba(255,255,255,.1);border-radius:13px;transition:background .2s;cursor:pointer}
+.sw input:checked+.sw-track{background:var(--orange)}
+.sw-thumb{position:absolute;top:3px;left:3px;width:20px;height:20px;background:#fff;border-radius:50%;transition:transform .2s;pointer-events:none}
+.sw input:checked~.sw-thumb{transform:translateX(18px)}
+
+/* CHIPS */
+.chips{display:flex;gap:8px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}
+.chips::-webkit-scrollbar{display:none}
+.chip{display:inline-flex;align-items:center;padding:7px 14px;border-radius:20px;font-size:13px;font-weight:600;white-space:nowrap;border:1px solid var(--border);background:var(--bg-card);color:var(--text-2);cursor:pointer;transition:all .15s}
+.chip.on{background:var(--orange);border-color:var(--orange);color:#fff}
+
+/* DETAIL */
+.det-sec{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
+.det-row{padding:12px 16px;display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
+.det-row+.det-row{border-top:1px solid var(--border)}
+.det-k{font-size:11px;color:var(--text-3);font-weight:600;letter-spacing:.4px;text-transform:uppercase;min-width:80px}
+.det-v{font-size:14px;font-weight:600;text-align:right;flex:1}
+.det-v.mono{font-family:var(--FM)}
+
+/* STATUS BLOCK */
+.st-blk{border-radius:var(--r);padding:14px 16px}
+.st-em{background:rgba(255,107,43,.1);border:1px solid rgba(255,107,43,.2)}
+.st-ag{background:var(--blue-dim);border:1px solid rgba(74,158,255,.2)}
+.st-ok{background:var(--green-dim);border:1px solid rgba(46,201,124,.2)}
+
+/* EMPTY STATE */
+.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 24px;gap:12px;color:var(--text-3)}
+.empty svg{opacity:.35}
+.empty p{font-size:14px;text-align:center}
+
+/* SIGNATURE */
+.sig-c{width:100%;height:120px;border:2px dashed var(--border);border-radius:var(--rs);background:rgba(255,255,255,.02);display:block;touch-action:none}
+
+/* PHOTOS */
+.photos-g{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.photo-t{aspect-ratio:1;border-radius:var(--rs);overflow:hidden;position:relative;border:1px solid var(--border)}
+.photo-t img{width:100%;height:100%;object-fit:cover}
+.photo-del{position:absolute;top:4px;right:4px;background:var(--red);border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;border:none;cursor:pointer;z-index:2}
+.photo-add{aspect-ratio:1;border-radius:var(--rs);border:2px dashed var(--border);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;cursor:pointer;color:var(--text-3);font-size:11px;background:none;transition:border-color .15s}
+.photo-add:active{border-color:var(--orange)}
+
+/* PECA ROW */
+.peca-row{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--rs);padding:12px;display:flex;flex-direction:column;gap:8px}
+.peca-inps{display:flex;gap:8px}
+.peca-inps .inp{flex:1}
+.inp-qty{width:72px;flex:none !important}
+
+/* SERVICO ROW */
+.svc-row{display:flex;align-items:center;gap:10px}
+.svc-row .inp{flex:1}
+.del-btn{background:none;border:none;color:var(--red);cursor:pointer;padding:4px;flex-shrink:0;display:flex;align-items:center}
+
+/* LOGIN */
+.login-page{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100%;padding:32px 24px;gap:32px}
+.brand{font-size:38px;font-weight:800;letter-spacing:-1.5px;text-align:center;line-height:1}
+.brand span{color:var(--orange)}
+.brand-sub{font-size:12px;font-family:var(--FM);color:var(--text-3);text-align:center;margin-top:6px;letter-spacing:2px}
+
+/* QUICK ACTIONS */
+.qa-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.qa-btn{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r);padding:16px 12px;text-align:center;cursor:pointer;transition:background .12s,transform .1s;display:flex;flex-direction:column;align-items:center;gap:8px}
+.qa-btn:active{background:var(--bg-card-hover);transform:scale(.97)}
+.qa-btn p{font-size:13px;font-weight:600}
+
+/* AVATAR */
+.avatar{width:80px;height:80px;border-radius:50%;background:var(--orange-dim);border:2px solid var(--orange-bdr);display:flex;align-items:center;justify-content:center;margin:0 auto;font-size:32px;font-weight:800;color:var(--orange)}
+
+/* CHECKIN ITEM */
+.ci-item{display:flex;align-items:center;gap:12px;padding:12px 16px}
+.ci-num{width:32px;height:32px;border-radius:50%;background:var(--green-dim);border:1px solid rgba(46,201,124,.3);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:var(--green);flex-shrink:0;font-family:var(--FM)}
+
+/* OFFLINE QUEUE ITEM */
+.q-item{background:var(--yellow-dim);border:1px solid rgba(255,187,51,.2);border-radius:var(--rs);padding:12px 14px;display:flex;justify-content:space-between;align-items:center}
+.q-item-info p{font-size:13px;font-weight:600}
+.q-item-info span{font-size:11px;color:var(--text-3)}
+
+/* GPS TAG */
+.gps-tag{display:inline-flex;align-items:center;gap:5px;background:var(--green-dim);border:1px solid rgba(46,201,124,.2);border-radius:8px;padding:6px 10px;font-size:12px;color:var(--green);font-family:var(--FM)}
+
+/* GREETING */
+.gr-line{font-size:13px;color:var(--text-2)}
+.gr-name{font-size:24px;font-weight:800;letter-spacing:-.5px;margin-top:2px}
+
+/* TEMPLATE ITEM */
+.tmpl-item{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px;display:flex;align-items:center;gap:14px;cursor:pointer;transition:background .12s}
+.tmpl-item:active{background:var(--bg-card-hover)}
+.tmpl-ico{width:44px;height:44px;border-radius:12px;background:var(--orange-dim);border:1px solid var(--orange-bdr);display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.tmpl-info h4{font-size:15px;font-weight:700}
+.tmpl-info p{font-size:12px;color:var(--text-3);margin-top:2px}
+
+/* ANIMATIONS */
+.fi{animation:fi .2s ease}
+@keyframes fi{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.su{animation:su .25s ease}
+@keyframes su{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+
+/* SPACERS */
+.sp3>*+*{margin-top:10px} .sp4>*+*{margin-top:14px} .sp5>*+*{margin-top:18px}
+.mt2{margin-top:8px} .mt3{margin-top:12px} .mt4{margin-top:16px} .mt6{margin-top:24px}
+.flex{display:flex} .aic{align-items:center} .jb{justify-content:space-between} .g2{gap:8px} .g3{gap:12px} .f1{flex:1}
+.tc{text-align:center} .hidden{display:none!important}
+
+/* SUCCESS OVERLAY */
+.sov{position:fixed;inset:0;background:rgba(8,14,26,.92);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:300;gap:16px}
+.sov-ico{width:72px;height:72px;border-radius:50%;background:var(--green-dim);border:2px solid rgba(46,201,124,.4);display:flex;align-items:center;justify-content:center}
+.sov-title{font-size:22px;font-weight:800}
+.sov-sub{font-size:14px;color:var(--text-2);text-align:center;padding:0 32px}
+
+/* SYNC SPINNER */
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.syncing{animation:pulse 1.2s ease infinite}
+</style>
+</head>
+<body>
+
+<div id="offline-bar">⚡ SEM CONEXÃO — dados salvos localmente</div>
+<div id="sync-badge"><span class="syncing">↑</span> Sincronizando...</div>
+
+<div id="loader">
+  <div class="ldr-logo">BG<span>Campo</span></div>
+  <div class="ldr-sub">CARREGANDO</div>
+  <div class="spin"></div>
+</div>
+
+<div id="app" style="display:none"></div>
+
+<script src="app.js?v=1001"></script>
+</body>
+</html>
