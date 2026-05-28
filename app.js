@@ -825,164 +825,179 @@ function renderNovoRelatorio() {
 function buildRelForm(template, ordem, onBack) {
   const frag = document.createDocumentFragment();
 
-  // OS summary or client input
-  if(ordem) {
+  // ── 1. CABEÇALHO: OS ou Cliente/Tipo ────────────────────────
+  if (ordem) {
     const info = div('card mt3');
-    info.style.marginBottom='16px';
-    info.innerHTML=`<div class="card-b"><p style="font-size:12px;color:var(--text-2)">OS #${ordem.numero||ordem.id} — ${ordem.clienteNome||'—'}</p>${ordem.equipamentoPatrimonio?`<p style="font-family:var(--FM);font-size:12px;color:var(--text-3)">${ordem.equipamentoPatrimonio} ${ordem.equipamentoModelo||''}</p>`:''}</div>`;
+    info.style.marginBottom = '16px';
+    info.innerHTML = `<div class="card-b">
+      <p style="font-size:12px;color:var(--text-2)">OS #${ordem.numero||ordem.id} — ${ordem.clienteNome||'—'}</p>
+      ${ordem.equipamentoPatrimonio ? `<p style="font-family:var(--FM);font-size:12px;color:var(--text-3)">${ordem.equipamentoPatrimonio} ${ordem.equipamentoModelo||''}</p>` : ''}
+    </div>`;
     frag.appendChild(info);
   } else {
-    const g = div('fg'); g.style.marginBottom='12px';
-    g.innerHTML=`<label class="lbl">Cliente / Local *</label><input id="rel-cli" class="inp" placeholder="Nome do cliente ou local">`;
+    const g = div('fg'); g.style.marginBottom = '12px';
+    g.innerHTML = `<label class="lbl">Cliente / Local *</label>
+      <input id="rel-cli" class="inp" placeholder="Nome do cliente ou local">`;
     frag.appendChild(g);
-    const g2 = div('fg'); g2.style.marginBottom='18px';
-    g2.innerHTML=`<label class="lbl">Tipo de Serviço</label>
-      <select id="rel-tipo" class="sel">${Object.entries(TIPO_LBL).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select>`;
+    const g2 = div('fg'); g2.style.marginBottom = '18px';
+    g2.innerHTML = `<label class="lbl">Tipo de Serviço</label>
+      <select id="rel-tipo" class="sel">
+        ${Object.entries(TIPO_LBL).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
+      </select>`;
     frag.appendChild(g2);
   }
 
-  // Template campos
-  if(template?.campos?.length) {
-    const ttl = div('sec-ttl'); ttl.style.marginBottom='12px';
-    ttl.innerHTML=`${IC.orders} ${template.nome||'Checklist'}`;
+  // ── 2. CAMPOS DO TEMPLATE ────────────────────────────────────
+  // Filtra campos de assinatura — sempre exibidos na seção fixa no final
+  const camposSemAssinatura = (template?.campos||[]).filter(c => c?.tipo !== 'assinatura');
+
+  if (camposSemAssinatura.length) {
+    const ttl = div('sec-ttl'); ttl.style.marginBottom = '12px';
+    ttl.innerHTML = `${IC.orders} ${template.nome||'Checklist'}`;
     frag.appendChild(ttl);
 
-    template.campos.forEach(campo=>{
-      const w = div(); w.style.marginBottom='12px';
-      if(campo.tipo==='secao') {
-        w.innerHTML=`<div style="padding:6px 0 3px;border-bottom:1px solid var(--border);color:var(--orange);font-size:13px;font-weight:700">${campo.label}</div>`;
-      } else if(campo.tipo==='checkbox') {
-        w.innerHTML=`<div class="sw-row"><span class="sw-lbl">${campo.label}</span><label class="sw"><input type="checkbox" ${S.relDados[campo.id]?'checked':''} data-cid="${campo.id}"><span class="sw-track"></span><span class="sw-thumb"></span></label></div>`;
-        w.querySelector('input').addEventListener('change',e=>{S.relDados[campo.id]=e.target.checked;});
-      } else if(campo.tipo==='observacao') {
-        w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label><textarea class="txta" data-cid="${campo.id}" placeholder="${campo.placeholder||''}">${S.relDados[campo.id]||''}</textarea></div>`;
-        w.querySelector('textarea').addEventListener('change',e=>{S.relDados[campo.id]=e.target.value;});
-      } else if(campo.tipo==='gps') {
-        w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label>${S.relDados[campo.id]?`<div class="gps-tag">${IC.pin} ${S.relDados[campo.id]}</div>`:`<button class="btn btn-gh btn-sm mt2" data-gps="${campo.id}">${IC.pin} Capturar GPS</button>`}</div>`;
-        w.querySelector('[data-gps]')?.addEventListener('click',()=>captureGPS(campo.id));
-      } else if (campo.tipo === 'foto') {
-        const fid = 'f'+campo.id.replace(/[^a-z0-9]/gi,'');
-        w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label>
-          <label style="display:flex;align-items:center;gap:8px;background:var(--bg-card);border:1px dashed var(--border);border-radius:var(--rs);padding:12px 14px;cursor:pointer">
-            ${IC.camera} <span style="font-size:14px;color:var(--text-2)">Tirar foto</span>
-            <input type="file" accept="image/*" capture="environment" style="display:none" id="${fid}">
+    camposSemAssinatura.forEach(campo => {
+      if (!campo?.id && campo?.tipo !== 'secao') return;
+      const w = div(); w.style.marginBottom = '14px';
+
+      if (campo.tipo === 'secao') {
+        // Separador de seção
+        w.innerHTML = `<div style="padding:8px 0 4px;border-bottom:2px solid var(--orange);color:var(--orange);font-size:13px;font-weight:700;margin-top:8px">${campo.label}</div>`;
+
+      } else if (campo.tipo === 'checkbox') {
+        // Toggle sim/não
+        w.innerHTML = `<div class="sw-row">
+          <span class="sw-lbl">${campo.label}</span>
+          <label class="sw">
+            <input type="checkbox" ${S.relDados[campo.id]?'checked':''} data-cid="${campo.id}">
+            <span class="sw-track"></span><span class="sw-thumb"></span>
           </label>
-          <div id="${fid}p"></div>
         </div>`;
-        w.querySelector('input').addEventListener('change',e=>{
-          const file=e.target.files[0]; if(!file) return;
-          const r=new FileReader(); r.onload=ev=>{
-            S.relDados[campo.id]=ev.target.result;
-            const p=document.getElementById(fid+'p');
-            if(p) p.innerHTML=`<img src="${ev.target.result}" style="width:100%;border-radius:var(--rs);margin-top:6px;max-height:180px;object-fit:cover">`;
-          }; r.readAsDataURL(file);
-        });
+        w.querySelector('input').addEventListener('change', e => { S.relDados[campo.id] = e.target.checked; });
+
+      } else if (campo.tipo === 'numero' || campo.tipo === 'horimetro') {
+        // Campo numérico — teclado numérico no celular
+        w.innerHTML = `<div class="fg">
+          <label class="lbl">${campo.label}</label>
+          <input class="inp" type="number" inputmode="decimal" pattern="[0-9]*"
+            placeholder="${campo.placeholder||'0'}"
+            value="${S.relDados[campo.id]||''}">
+        </div>`;
+        w.querySelector('input').addEventListener('input', e => { S.relDados[campo.id] = e.target.value; });
+
       } else if (campo.tipo === 'select') {
-        const opts = campo.opcoes||['RUIM','REGULAR','BOM','NA'];
-        const needsDetail = opts.some(o=>['RUIM','REGULAR'].includes(o)); // show detail for quality selects
-        const fid2='fs'+campo.id.replace(/[^a-z0-9]/gi,'');
-        w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label>
-          <select class="sel" data-cid="${campo.id}">
+        // Seletor com opções
+        const opts = campo.opcoes || ['RUIM','REGULAR','BOM','N/A'];
+        const fid = 'fs' + campo.id.replace(/[^a-z0-9]/gi,'');
+        const isQualidade = opts.some(o => ['RUIM','REGULAR','BOM'].includes(String(o).toUpperCase()));
+        w.innerHTML = `<div class="fg">
+          <label class="lbl">${campo.label}</label>
+          <select class="sel" id="${fid}">
             <option value="">Selecione...</option>
-            ${opts.map(op=>`<option value="${op}" ${S.relDados[campo.id]===op?'selected':''}>${op}</option>`).join('')}
+            ${opts.map(op => `<option value="${op}" ${S.relDados[campo.id]===String(op)?'selected':''}>${op}</option>`).join('')}
           </select>
-          <div id="${fid2}-extra" style="display:none;flex-direction:column;gap:6px;margin-top:6px">
-            <input class="inp" id="${fid2}-desc" placeholder="Descrever problema..." value="${S.relDados[campo.id+'_obs']||''}">
-            <label style="display:flex;align-items:center;gap:8px;background:var(--bg-card);border:1px dashed var(--border);border-radius:var(--rs);padding:10px 12px;cursor:pointer;font-size:13px;color:var(--text-2)">
-              ${IC.camera} Foto do problema
-              <input type="file" accept="image/*" capture="environment" style="display:none" id="${fid2}-foto">
-            </label>
-            <div id="${fid2}-fprev"></div>
+          <div id="${fid}-extra" style="display:${(S.relDados[campo.id]&&isQualidade&&S.relDados[campo.id]!=='BOM'&&S.relDados[campo.id]!=='N/A')?'flex':'none'};flex-direction:column;gap:6px;margin-top:8px">
+            <input class="inp" id="${fid}-obs" placeholder="Descrever..." value="${S.relDados[campo.id+'_obs']||''}">
           </div>
         </div>`;
         const sel = w.querySelector('select');
-        const extra = w.querySelector('#'+fid2+'-extra');
-        const isBomRuim = opts.some(o=>o==='BOM'||o==='RUIM'||o==='REGULAR');
-        sel.addEventListener('change',e=>{
-          S.relDados[campo.id]=e.target.value;
-          if(!extra) return;
-          if(isBomRuim) {
-            // Show detail only for non-BOM/NA selections
-            const bad = e.target.value && e.target.value!=='BOM' && e.target.value!=='NA';
-            extra.style.display=bad?'flex':'none';
-          } else {
-            // For SIM/NÃO and others, always show detail when something is selected
-            extra.style.display=e.target.value?'flex':'none';
-          }
+        const extra = document.getElementById ? null : w.querySelector('#'+fid+'-extra');
+        sel.addEventListener('change', e => {
+          S.relDados[campo.id] = e.target.value;
+          const ex = w.querySelector('#'+fid+'-extra');
+          if (ex) ex.style.display = (isQualidade && e.target.value && e.target.value!=='BOM' && e.target.value!=='N/A') ? 'flex' : 'none';
         });
-        w.querySelector('#'+fid2+'-desc')?.addEventListener('input',e=>{S.relDados[campo.id+'_obs']=e.target.value;});
-        w.querySelector('#'+fid2+'-foto')?.addEventListener('change',e=>{
-          const file=e.target.files[0]; if(!file) return;
-          const r=new FileReader(); r.onload=ev=>{
-            S.relDados[campo.id+'_foto']=ev.target.result;
-            const p=w.querySelector('#'+fid2+'-fprev');
-            if(p) p.innerHTML=`<img src="${ev.target.result}" style="width:100%;border-radius:var(--rs);max-height:150px;object-fit:cover">`;
+        w.querySelector('#'+fid+'-obs')?.addEventListener('input', e => { S.relDados[campo.id+'_obs'] = e.target.value; });
+
+      } else if (campo.tipo === 'data') {
+        // Data/hora
+        w.innerHTML = `<div class="fg">
+          <label class="lbl">${campo.label}</label>
+          <input class="inp" type="datetime-local" value="${S.relDados[campo.id]||''}">
+        </div>`;
+        w.querySelector('input').addEventListener('change', e => { S.relDados[campo.id] = e.target.value; });
+
+      } else if (campo.tipo === 'gps') {
+        // Captura GPS
+        const gpsCaptured = S.relDados[campo.id];
+        w.innerHTML = `<div class="fg">
+          <label class="lbl">${campo.label}</label>
+          ${gpsCaptured
+            ? `<div class="gps-tag">${IC.pin} ${gpsCaptured} <button class="btn" style="padding:2px 8px;font-size:11px;margin-left:6px" data-gps="${campo.id}">Recapturar</button></div>`
+            : `<button class="btn btn-gh" style="margin-top:4px" data-gps="${campo.id}">${IC.pin} Capturar localização</button>`
+          }
+        </div>`;
+        w.querySelector('[data-gps]')?.addEventListener('click', () => captureGPS(campo.id));
+
+      } else if (campo.tipo === 'foto') {
+        // Foto do campo
+        const fid2 = 'fc' + campo.id.replace(/[^a-z0-9]/gi,'');
+        w.innerHTML = `<div class="fg">
+          <label class="lbl">${campo.label}</label>
+          <label style="display:flex;align-items:center;gap:10px;background:var(--bg-card);border:1px dashed var(--border);border-radius:var(--rs);padding:12px 14px;cursor:pointer">
+            ${IC.camera} <span style="font-size:14px;color:var(--text-2)">Tirar foto</span>
+            <input type="file" accept="image/*" capture="environment" style="display:none" id="${fid2}">
+          </label>
+          <div id="${fid2}p"></div>
+        </div>`;
+        w.querySelector('input').addEventListener('change', e => {
+          const file = e.target.files[0]; if (!file) return;
+          const r = new FileReader(); r.onload = ev => {
+            S.relDados[campo.id] = ev.target.result;
+            const p = w.querySelector('#'+fid2+'p');
+            if (p) p.innerHTML = `<img src="${ev.target.result}" style="width:100%;border-radius:var(--rs);margin-top:6px;max-height:200px;object-fit:cover">`;
           }; r.readAsDataURL(file);
         });
-      } else if (campo.tipo === 'data') {
-        w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label>
-          <input class="inp" type="datetime-local" data-cid="${campo.id}" value="${S.relDados[campo.id]||''}"></div>`;
-        w.querySelector('input').addEventListener('change',e=>{S.relDados[campo.id]=e.target.value;});
-      } else if (campo.tipo === 'horimetro' || campo.tipo === 'numero') {
-        w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label>
-          <input class="inp" type="number" inputmode="decimal" data-cid="${campo.id}" placeholder="${campo.placeholder||campo.label}" value="${S.relDados[campo.id]||''}"></div>`;
-        w.querySelector('input').addEventListener('change',e=>{S.relDados[campo.id]=e.target.value;});
-      } else if (campo.tipo === 'assinatura') {
-        // Campo de assinatura do template — renderiza pad inline
-        const sid = 'sig-tmpl-'+campo.id.replace(/[^a-z0-9]/gi,'');
-        w.innerHTML=`<div class="fg">
-          <div class="flex jb aic" style="margin-bottom:6px">
-            <label class="lbl">${campo.label}</label>
-            <button class="btn" style="padding:3px 10px;font-size:12px" data-clrsig="${sid}">Limpar</button>
-          </div>
-          <canvas id="${sid}" width="600" height="180" style="width:100%;height:180px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--rs);touch-action:none"></canvas>
+
+      } else if (campo.tipo === 'observacao' || campo.tipo === 'textarea') {
+        // Texto longo
+        w.innerHTML = `<div class="fg">
+          <label class="lbl">${campo.label}</label>
+          <textarea class="txta" placeholder="${campo.placeholder||''}">${S.relDados[campo.id]||''}</textarea>
         </div>`;
-        w.querySelector('[data-clrsig]')?.addEventListener('click',()=>{
-          const c=document.getElementById(sid); if(!c) return;
-          c.getContext('2d').clearRect(0,0,c.width,c.height);
-          S.relDados[campo.id]='';
-        });
-        setTimeout(()=>initSigPad(sid, val=>{ S.relDados[campo.id]=val; }),50);
+        w.querySelector('textarea').addEventListener('input', e => { S.relDados[campo.id] = e.target.value; });
+
       } else {
-        // Default: text input
-        w.innerHTML=`<div class="fg"><label class="lbl">${campo.label}</label>
-          <input class="inp" type="text" data-cid="${campo.id}" placeholder="${campo.placeholder||campo.label}" value="${S.relDados[campo.id]||''}"></div>`;
-        w.querySelector('input').addEventListener('change',e=>{S.relDados[campo.id]=e.target.value;});
+        // Texto padrão
+        w.innerHTML = `<div class="fg">
+          <label class="lbl">${campo.label}</label>
+          <input class="inp" type="text" placeholder="${campo.placeholder||campo.label}" value="${S.relDados[campo.id]||''}">
+        </div>`;
+        w.querySelector('input').addEventListener('input', e => { S.relDados[campo.id] = e.target.value; });
       }
+
       frag.appendChild(w);
     });
   }
 
-  // Serviços
-  const svWrap = div(); svWrap.style.marginTop='18px';
+  // ── 3. SERVIÇOS REALIZADOS ───────────────────────────────────
+  const svWrap = div(); svWrap.style.marginTop = '20px';
   rebuildSv(svWrap);
   frag.appendChild(svWrap);
 
-  // Peças
-  const pcWrap = div(); pcWrap.style.marginTop='18px';
+  // ── 4. PEÇAS UTILIZADAS ──────────────────────────────────────
+  const pcWrap = div(); pcWrap.style.marginTop = '18px';
   rebuildPc(pcWrap);
   frag.appendChild(pcWrap);
 
-  // Fotos
+  // ── 5. FOTOS ─────────────────────────────────────────────────
   frag.appendChild(buildFotos());
 
-  // Observações
-  const obsSec = div('fg'); obsSec.style.marginTop='18px';
-  obsSec.innerHTML=`<label class="lbl">Observações Gerais</label><textarea id="rel-obs" class="txta" placeholder="Observações adicionais..."></textarea>`;
+  // ── 6. OBSERVAÇÕES GERAIS ────────────────────────────────────
+  const obsSec = div('fg'); obsSec.style.marginTop = '18px';
+  obsSec.innerHTML = `<label class="lbl">Observações Gerais</label>
+    <textarea id="rel-obs" class="txta" placeholder="Observações adicionais..."></textarea>`;
   frag.appendChild(obsSec);
 
-  // Assinaturas — só adiciona as fixas se o template NÃO tiver campos de assinatura/horímetro
-  const camposTmpl = template?.campos || [];
-  const tmplTemAssinatura = camposTmpl.some(c => c?.tipo === 'assinatura');
-  if (!tmplTemAssinatura) {
-    frag.appendChild(buildAssinaturas());
-  }
+  // ── 7. ASSINATURAS — sempre no final, sempre 2: Cliente + Técnico ──
+  frag.appendChild(buildAssinaturas());
 
-  // Submit
+  // ── 8. BOTÃO ENVIAR ──────────────────────────────────────────
   const submitBtn = document.createElement('button');
-  submitBtn.className='btn btn-gr'; submitBtn.style.marginTop='20px';
-  submitBtn.innerHTML=`${IC.send} Enviar Relatório`;
-  submitBtn.addEventListener('click',()=>submitRelatorio(template,ordem,onBack));
+  submitBtn.className = 'btn btn-gr';
+  submitBtn.style.cssText = 'margin-top:24px;margin-bottom:32px';
+  submitBtn.innerHTML = `${IC.send} Enviar Relatório`;
+  submitBtn.addEventListener('click', () => submitRelatorio(template, ordem, onBack));
   frag.appendChild(submitBtn);
 
   return frag;
@@ -1068,39 +1083,46 @@ function buildFotos() {
 
 // ── ASSINATURAS ───────────────────────────────────────────────
 function buildAssinaturas() {
-  const wrap = div(); wrap.style.marginTop='18px';
-  wrap.innerHTML=`
-    <div class="sec-ttl" style="margin-bottom:12px">${IC.pen} Assinaturas</div>
-    <div class="fg" style="margin-bottom:14px">
-      <div class="flex jb aic" style="margin-bottom:6px">
-        <label class="lbl">Nome do Cliente</label>
-      </div>
-      <input id="sig-cli-nome" class="inp" placeholder="Nome completo do cliente" style="margin-bottom:8px">
+  const wrap = div();
+  wrap.style.cssText = 'margin-top:24px;padding-top:20px;border-top:1px solid var(--border)';
+  wrap.innerHTML = `
+    <div class="sec-ttl" style="margin-bottom:16px">${IC.pen} Assinaturas</div>
+
+    <!-- Assinatura do Cliente -->
+    <div class="fg" style="margin-bottom:20px">
+      <label class="lbl" style="margin-bottom:6px">Nome do Cliente</label>
+      <input id="sig-cli-nome" class="inp" placeholder="Nome completo do cliente" style="margin-bottom:12px">
       <div class="flex jb aic" style="margin-bottom:6px">
         <label class="lbl">Assinatura do Cliente</label>
-        <button class="btn btn-gh btn-sm" style="width:auto;padding:0 10px;height:28px;font-size:12px" id="clr-cli">Limpar</button>
+        <button class="btn btn-gh btn-sm" style="width:auto;padding:0 12px;height:30px;font-size:12px" id="clr-cli">Limpar</button>
       </div>
-      <canvas id="sig-cli" class="sig-c"></canvas>
+      <canvas id="sig-cli" class="sig-c" style="touch-action:none"></canvas>
+      <p style="font-size:11px;color:var(--text-3);margin-top:4px;text-align:center">Assine no campo acima</p>
     </div>
+
+    <!-- Assinatura do Técnico -->
     <div class="fg">
-      <div class="flex jb aic" style="margin-bottom:6px">
-        <label class="lbl">Nome do Técnico</label>
-      </div>
-      <input id="sig-tec-nome" class="inp" value="${S.user?.nome||''}" placeholder="Nome do técnico" style="margin-bottom:8px">
+      <label class="lbl" style="margin-bottom:6px">Nome do Técnico</label>
+      <input id="sig-tec-nome" class="inp" value="${S.user?.nome||''}" placeholder="Nome do técnico" style="margin-bottom:12px">
       <div class="flex jb aic" style="margin-bottom:6px">
         <label class="lbl">Assinatura do Técnico</label>
-        <button class="btn btn-gh btn-sm" style="width:auto;padding:0 10px;height:28px;font-size:12px" id="clr-tec">Limpar</button>
+        <button class="btn btn-gh btn-sm" style="width:auto;padding:0 12px;height:30px;font-size:12px" id="clr-tec">Limpar</button>
       </div>
-      <canvas id="sig-tec" class="sig-c"></canvas>
+      <canvas id="sig-tec" class="sig-c" style="touch-action:none"></canvas>
+      <p style="font-size:11px;color:var(--text-3);margin-top:4px;text-align:center">Assine no campo acima</p>
     </div>`;
-  setTimeout(()=>{
-    initSig('sig-cli','cli');
-    initSig('sig-tec','tec');
-    wrap.querySelector('#clr-cli').addEventListener('click',()=>clearSig('sig-cli','cli'));
-    wrap.querySelector('#clr-tec').addEventListener('click',()=>clearSig('sig-tec','tec'));
-    // Save names to relDados
-    // Names stored separately, not in relDados
-  },50);
+
+  setTimeout(() => {
+    initSig('sig-cli', 'cli');
+    initSig('sig-tec', 'tec');
+    wrap.querySelector('#clr-cli').addEventListener('click', () => clearSig('sig-cli','cli'));
+    wrap.querySelector('#clr-tec').addEventListener('click', () => clearSig('sig-tec','tec'));
+    // Store names in relDados for payload
+    const nomeCliEl = wrap.querySelector('#sig-cli-nome');
+    const nomeTecEl = wrap.querySelector('#sig-tec-nome');
+    if (nomeCliEl) nomeCliEl.addEventListener('input', e => { S.relDados['_nomeCli'] = e.target.value; });
+    if (nomeTecEl) nomeTecEl.addEventListener('input', e => { S.relDados['_nomeTec'] = e.target.value; });
+  }, 80);
   return wrap;
 }
 
