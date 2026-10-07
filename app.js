@@ -162,6 +162,57 @@ async function loadCache(key) {
   return val;
 }
 
+// ── RASCUNHO DO FORMULÁRIO (nunca perder o que já foi preenchido) ──────────
+// Antes, os campos do relatório só existiam na variável S (memória do
+// navegador) — se o app travasse, a aba fechasse sozinha (comum em PWA no
+// iOS sob pouca memória) ou desse algum erro de JS, tudo que o técnico já
+// tinha preenchido ia embora. Agora, toda mudança num campo agenda um
+// salvamento (com um pequeno atraso, pra não salvar a cada letra digitada)
+// no IndexedDB — e ao reabrir o app, se sobrar um rascunho não enviado, ele
+// oferece continuar de onde parou.
+const DRAFT_CACHE_KEY = 'rascunho_relatorio';
+let _draftSaveTimer = null;
+function agendarSalvarRascunho() {
+  if (!S.showNovoRelatorio) return; // só salva rascunho quando tem um relatório sendo preenchido
+  clearTimeout(_draftSaveTimer);
+  _draftSaveTimer = setTimeout(salvarRascunhoAgora, 400);
+}
+async function salvarRascunhoAgora() {
+  try {
+    await saveCache(DRAFT_CACHE_KEY, {
+      activeRelatorioOsId: S.activeRelatorioOsId,
+      relatorioTemplateId: S.relatorioTemplateId,
+      relatorioStep: S.relatorioStep,
+      relServicos: S.relServicos,
+      relPecas: S.relPecas,
+      relFotos: S.relFotos,
+      relDados: S.relDados,
+      relSigCli: S.relSigCli,
+      relSigTec: S.relSigTec,
+      savedAt: Date.now(),
+    });
+  } catch(e) { /* storage indisponível — segue sem travar o preenchimento */ }
+}
+async function carregarRascunhoSalvo() {
+  try { return await loadCache(DRAFT_CACHE_KEY); } catch(e) { return null; }
+}
+async function limparRascunhoSalvo() {
+  try { await saveCache(DRAFT_CACHE_KEY, null); } catch(e) {}
+}
+// Restaura o rascunho salvo de volta pra S e abre o formulário na etapa certa.
+function restaurarRascunho(draft) {
+  S.activeRelatorioOsId = draft.activeRelatorioOsId ?? null;
+  S.relatorioTemplateId = draft.relatorioTemplateId ?? null;
+  S.relatorioStep = draft.relatorioStep || 1;
+  S.relServicos = draft.relServicos || [{descricao:'',concluido:false}];
+  S.relPecas = draft.relPecas || [];
+  S.relFotos = draft.relFotos || [];
+  S.relDados = draft.relDados || {};
+  S.relSigCli = draft.relSigCli || '';
+  S.relSigTec = draft.relSigTec || '';
+  S.showNovoRelatorio = true;
+}
+
 // ── OFFLINE QUEUE ─────────────────────────────────────────────
 async function queueAction(action, payload) {
   const id = await dbPutAuto('queue', { action, payload, ts: Date.now() });
@@ -1321,6 +1372,7 @@ async function submitRelatorio(template, ordem, onBack) {
     S.showNovoRelatorio=false;S.activeRelatorioOsId=null;S.selectedOrdemId=null;
     S.tab='relatorios';
     resetRelForm();
+    await limparRascunhoSalvo(); // enviado (ou na fila offline) — não precisa mais do rascunho
     // Force reload from server to show new report
     if(S.isOnline) {
       await loadServerData();
@@ -1342,6 +1394,34 @@ async function processSyncNow() {
   render();
 }
 
+// ── SALVAMENTO AUTOMÁTICO (delegação de eventos) ──────────────────────────
+// Um único listener no container do app cobre TODOS os campos do formulário
+// (inclusive campos que forem adicionados no futuro) sem precisar lembrar de
+// chamar o salvamento em cada input individualmente.
+app.addEventListener('input', agendarSalvarRascunho);
+app.addEventListener('change', agendarSalvarRascunho);
+
+// ── NUNCA TRAVAR EM SILÊNCIO ───────────────────────────────────────────────
+// Se acontecer um erro inesperado de JS, tenta salvar o rascunho na hora
+// (sem esperar o debounce) e avisa o técnico, em vez de só travar a tela
+// sem explicação e sem garantia de que o preenchimento foi salvo.
+window.addEventListener('error', (e) => {
+  console.error('[BG Campo] Erro inesperado:', e.error || e.message);
+  if (S.showNovoRelatorio) salvarRascunhoAgora();
+});
+window.addEventListener('unhandledrejection', (e) => {
+  console.error('[BG Campo] Promise rejeitada:', e.reason);
+  if (S.showNovoRelatorio) salvarRascunhoAgora();
+});
+// Salva também quando o app vai pra segundo plano ou a aba perde foco —
+// momentos comuns de o iOS matar a aba por pouca memória, sem aviso nenhum.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && S.showNovoRelatorio) salvarRascunhoAgora();
+});
+window.addEventListener('pagehide', () => {
+  if (S.showNovoRelatorio) salvarRascunhoAgora();
+});
+
 // ── BOOT ──────────────────────────────────────────────────────
 async function boot() {
   await initDB();
@@ -1356,6 +1436,24 @@ async function boot() {
   document.getElementById('app').style.display='flex';
 
   render();
+
+  // Se sobrou um rascunho de relatório não enviado (app travou, fechou
+  // sozinho etc.), oferece continuar de onde parou em vez de simplesmente
+  // sumir com o que já tinha sido preenchido.
+  if (S.user) {
+    const draft = await carregarRascunhoSalvo();
+    if (draft && draft.savedAt) {
+      const minsAtras = Math.round((Date.now() - draft.savedAt) / 60000);
+      const quando = minsAtras < 1 ? 'agora há pouco' : minsAtras < 60 ? `há ${minsAtras} min` : `em ${new Date(draft.savedAt).toLocaleString('pt-BR')}`;
+      const continuar = confirm(`Encontramos um relatório que você estava preenchendo e não chegou a enviar (salvo ${quando}). Quer continuar de onde parou?`);
+      if (continuar) {
+        restaurarRascunho(draft);
+        render();
+      } else {
+        await limparRascunhoSalvo();
+      }
+    }
+  }
 
   // Load fresh data in background
   if(S.user && S.isOnline) {
