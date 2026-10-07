@@ -162,6 +162,41 @@ async function loadCache(key) {
   return val;
 }
 
+// ── FOTOS: compressão + tratamento de erro ──────────────────────────────────
+// Antes, a foto ia direto do arquivo da câmera (que no celular moderno pode
+// ter 5-10MB) pro base64, sem nenhum limite nem aviso se desse errado. Em
+// conexão fraca ou celular mais simples isso falhava silenciosamente — a
+// foto simplesmente não aparecia, sem explicação nenhuma. Agora: redimensiona
+// e comprime antes de guardar (bem mais leve e confiável, e ocupa menos
+// espaço no rascunho salvo), e avisa claramente se algo der errado.
+function processarFotoArquivo(file, maxDim = 1600, qualidade = 0.75) {
+  return new Promise((resolve, reject) => {
+    if (!file || !file.type?.startsWith('image/')) { reject(new Error('Arquivo não é uma imagem')); return; }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Não consegui ler o arquivo da foto'));
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Não consegui abrir a foto'));
+      img.onload = () => {
+        try {
+          let { width, height } = img;
+          if (width > maxDim || height > maxDim) {
+            if (width > height) { height = Math.round(height * maxDim / width); width = maxDim; }
+            else { width = Math.round(width * maxDim / height); height = maxDim; }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = width; canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', qualidade));
+        } catch (e) { reject(e); }
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 // ── RASCUNHO DO FORMULÁRIO (nunca perder o que já foi preenchido) ──────────
 // Antes, os campos do relatório só existiam na variável S (memória do
 // navegador) — se o app travasse, a aba fechasse sozinha (comum em PWA no
@@ -991,13 +1026,18 @@ function buildRelForm(template, ordem, onBack) {
           </label>
           <div id="${fid2}p"></div>
         </div>`;
-        w.querySelector('input').addEventListener('change', e => {
+        w.querySelector('input').addEventListener('change', async e => {
           const file = e.target.files[0]; if (!file) return;
-          const r = new FileReader(); r.onload = ev => {
-            S.relDados[campo.id] = ev.target.result;
-            const p = w.querySelector('#'+fid2+'p');
-            if (p) p.innerHTML = `<img src="${ev.target.result}" style="width:100%;border-radius:var(--rs);margin-top:6px;max-height:200px;object-fit:cover">`;
-          }; r.readAsDataURL(file);
+          const p = w.querySelector('#'+fid2+'p');
+          if (p) p.innerHTML = `<span style="font-size:12px;color:var(--text-2)">Processando foto...</span>`;
+          try {
+            const dataUrl = await processarFotoArquivo(file);
+            S.relDados[campo.id] = dataUrl;
+            if (p) p.innerHTML = `<img src="${dataUrl}" style="width:100%;border-radius:var(--rs);margin-top:6px;max-height:200px;object-fit:cover">`;
+            agendarSalvarRascunho();
+          } catch (err) {
+            if (p) p.innerHTML = `<span style="font-size:12px;color:var(--red)">${IC.warn} Não deu pra usar essa foto (${err.message}). Tente tirar de novo.</span>`;
+          }
         });
 
       } else if (campo.tipo === 'observacao' || campo.tipo === 'textarea') {
@@ -1121,12 +1161,18 @@ function buildFotos() {
     <div class="photos-g" id="pg">
       <label class="photo-add">${IC.camera}<span>Adicionar</span><input type="file" accept="image/*" capture="environment" multiple class="hidden"></label>
     </div>`;
-  wrap.querySelector('input[type=file]').addEventListener('change',e=>{
-    Array.from(e.target.files||[]).forEach(f=>{
-      const r=new FileReader();
-      r.onload=ev=>{S.relFotos.push(ev.target.result);rebuildGrid();};
-      r.readAsDataURL(f);
-    });
+  wrap.querySelector('input[type=file]').addEventListener('change',async e=>{
+    const arquivos = Array.from(e.target.files||[]);
+    for (const f of arquivos) {
+      try {
+        const dataUrl = await processarFotoArquivo(f);
+        S.relFotos.push(dataUrl);
+        rebuildGrid();
+        agendarSalvarRascunho();
+      } catch (err) {
+        alert(`${IC.warn} Não deu pra usar uma das fotos (${err.message}). As outras foram adicionadas normalmente — tente tirar essa de novo.`);
+      }
+    }
     e.target.value='';
   });
   return wrap;
