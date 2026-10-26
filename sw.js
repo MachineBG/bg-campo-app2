@@ -1,5 +1,5 @@
 // BG Campo - Service Worker v2
-const CACHE = 'bg-campo-v2';
+const CACHE = 'bg-campo-v3';
 const BASE = '/bg-campo-app2';
 const ASSETS = [
   BASE + '/',
