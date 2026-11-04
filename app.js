@@ -77,6 +77,13 @@ const S = {
   relDados: {},
   relSigCli: '',
   relSigTec: '',
+  relObs: '',
+  relNomeCli: '',
+  relNomeTec: '',
+  relClienteNome: '',
+  relTipoServico: '',
+  rascunhoId: null,
+  rascunhos: [],
 };
 
 // ── INDEXEDDB ─────────────────────────────────────────────────
@@ -205,8 +212,28 @@ function processarFotoArquivo(file, maxDim = 1600, qualidade = 0.75) {
 // salvamento (com um pequeno atraso, pra não salvar a cada letra digitada)
 // no IndexedDB — e ao reabrir o app, se sobrar um rascunho não enviado, ele
 // oferece continuar de onde parou.
-const DRAFT_CACHE_KEY = 'rascunho_relatorio';
+const DRAFT_CACHE_KEY = 'rascunhos_v2';   // lista de rascunhos (vários relatórios podem ficar aguardando assinatura)
+const DRAFT_OLD_KEY = 'rascunho_relatorio'; // formato antigo (um só) — migrado automaticamente
 let _draftSaveTimer = null;
+
+// Lê do formulário na tela os campos que não ficam em S (observações, nomes, cliente...)
+function coletarDoDom() {
+  const v = id => { const e = document.getElementById(id); return e ? e.value : null; };
+  const obs = v('rel-obs'); if (obs !== null) S.relObs = obs;
+  const nc = v('sig-cli-nome'); if (nc !== null) S.relNomeCli = nc;
+  const nt = v('sig-tec-nome'); if (nt !== null) S.relNomeTec = nt;
+  const cli = v('rel-cli'); if (cli !== null) S.relClienteNome = cli;
+  const tp = v('rel-tipo'); if (tp !== null) S.relTipoServico = tp;
+  // Assinaturas: pega do desenho atual se houver
+  const c1 = document.getElementById('sig-cli'); if (c1 && c1.tagName === 'CANVAS') { const d = exportSig(c1); if (d) S.relSigCli = d; }
+  const c2 = document.getElementById('sig-tec'); if (c2 && c2.tagName === 'CANVAS') { const d = exportSig(c2); if (d) S.relSigTec = d; }
+}
+function rascunhoTemConteudo() {
+  if (S.relFotos.length || S.relPecas.length) return true;
+  if (S.relServicos.some(x => (x.descricao||'').trim())) return true;
+  if (Object.entries(S.relDados).some(([k,v]) => !k.startsWith('_') && v !== '' && v !== false && v != null)) return true;
+  return !!((S.relObs||'').trim() || (S.relClienteNome||'').trim() || S.relSigCli || S.relSigTec || (S.relNomeCli||'').trim());
+}
 function agendarSalvarRascunho() {
   if (!S.showNovoRelatorio) return; // só salva rascunho quando tem um relatório sendo preenchido
   clearTimeout(_draftSaveTimer);
@@ -214,7 +241,14 @@ function agendarSalvarRascunho() {
 }
 async function salvarRascunhoAgora() {
   try {
-    await saveCache(DRAFT_CACHE_KEY, {
+    if (!S.showNovoRelatorio) return;
+    coletarDoDom();
+    if (!rascunhoTemConteudo()) return;
+    if (!S.rascunhoId) S.rascunhoId = (S.activeRelatorioOsId ? 'os-' + S.activeRelatorioOsId : 'novo') + '-' + Date.now();
+    const ordem = S.activeRelatorioOsId ? S.ordens.find(o => o.id === S.activeRelatorioOsId) : null;
+    const draft = {
+      id: S.rascunhoId,
+      titulo: ordem ? `OS #${ordem.numero||ordem.id} — ${ordem.clienteNome||''}` : (S.relClienteNome || 'Relatório sem cliente'),
       activeRelatorioOsId: S.activeRelatorioOsId,
       relatorioTemplateId: S.relatorioTemplateId,
       relatorioStep: S.relatorioStep,
@@ -224,27 +258,55 @@ async function salvarRascunhoAgora() {
       relDados: S.relDados,
       relSigCli: S.relSigCli,
       relSigTec: S.relSigTec,
+      relObs: S.relObs,
+      relNomeCli: S.relNomeCli,
+      relNomeTec: S.relNomeTec,
+      relClienteNome: S.relClienteNome,
+      relTipoServico: S.relTipoServico,
       savedAt: Date.now(),
-    });
-  } catch(e) { /* storage indisponível — segue sem travar o preenchimento */ }
+    };
+    const i = S.rascunhos.findIndex(d => d.id === draft.id);
+    if (i >= 0) S.rascunhos[i] = draft; else S.rascunhos.unshift(draft);
+    await saveCache(DRAFT_CACHE_KEY, S.rascunhos);
+  } catch(e) { console.warn('rascunho: não consegui salvar', e); }
 }
-async function carregarRascunhoSalvo() {
-  try { return await loadCache(DRAFT_CACHE_KEY); } catch(e) { return null; }
+async function carregarRascunhos() {
+  try {
+    let lista = await loadCache(DRAFT_CACHE_KEY);
+    if (!Array.isArray(lista)) lista = [];
+    // migra o rascunho antigo (formato de um só), se existir
+    const velho = await loadCache(DRAFT_OLD_KEY);
+    if (velho && velho.savedAt) {
+      lista.unshift({ ...velho, id: 'antigo-' + velho.savedAt, titulo: 'Relatório recuperado' });
+      await saveCache(DRAFT_OLD_KEY, null);
+      await saveCache(DRAFT_CACHE_KEY, lista);
+    }
+    S.rascunhos = lista;
+  } catch(e) { S.rascunhos = []; }
 }
-async function limparRascunhoSalvo() {
-  try { await saveCache(DRAFT_CACHE_KEY, null); } catch(e) {}
+async function limparRascunhoSalvo(id) {
+  try {
+    const alvo = id || S.rascunhoId;
+    if (alvo) { S.rascunhos = S.rascunhos.filter(d => d.id !== alvo); await saveCache(DRAFT_CACHE_KEY, S.rascunhos); }
+  } catch(e) {}
 }
-// Restaura o rascunho salvo de volta pra S e abre o formulário na etapa certa.
+// Restaura o rascunho: todos os campos voltam como estavam.
 function restaurarRascunho(draft) {
+  S.rascunhoId = draft.id || null;
   S.activeRelatorioOsId = draft.activeRelatorioOsId ?? null;
   S.relatorioTemplateId = draft.relatorioTemplateId ?? null;
-  S.relatorioStep = draft.relatorioStep || 1;
-  S.relServicos = draft.relServicos || [{descricao:'',concluido:false}];
+  S.relatorioStep = draft.relatorioStep || 2;
+  S.relServicos = (draft.relServicos && draft.relServicos.length) ? draft.relServicos : [{descricao:'',concluido:false}];
   S.relPecas = draft.relPecas || [];
   S.relFotos = draft.relFotos || [];
   S.relDados = draft.relDados || {};
   S.relSigCli = draft.relSigCli || '';
   S.relSigTec = draft.relSigTec || '';
+  S.relObs = draft.relObs || '';
+  S.relNomeCli = draft.relNomeCli || S.relDados._nomeCli || '';
+  S.relNomeTec = draft.relNomeTec || S.relDados._nomeTec || '';
+  S.relClienteNome = draft.relClienteNome || '';
+  S.relTipoServico = draft.relTipoServico || '';
   S.showNovoRelatorio = true;
 }
 
@@ -274,6 +336,8 @@ async function processQueue() {
       S.syncQueue = S.syncQueue.filter(x => x.id !== item.id);
     } catch (e) {
       console.error('Queue item failed:', e);
+      item.erro = String(e && e.message || e);
+      if (isNetErr(e)) break; // sem rede de verdade: para e tenta de novo depois
     }
   }
 
@@ -291,17 +355,9 @@ async function executeQueuedAction(item) {
   if (action === 'iniciarOrdem') {
     await trpcMutation('campo.mobile.iniciarOrdem', {id: payload.id});
   } else if (action === 'submitRelatorio') {
-    await fetch(ENDPOINTS.submitRelatorio, {
-      method:'POST', credentials:'include',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
-    }).then(r => r.json());
+    await postRestQueued(ENDPOINTS.submitRelatorio, payload);
   } else if (action === 'submitRelatorioDireto') {
-    await fetch(ENDPOINTS.submitRelatorioDireto, {
-      method:'POST', credentials:'include',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
-    }).then(r => r.json());
+    await postRestQueued(ENDPOINTS.submitRelatorioDireto, payload);
   } else if (action === 'checkin') {
     await trpcMutation('campo.visitaComercial.checkin', payload);
   } else if (action === 'iniciarDia') {
@@ -309,6 +365,22 @@ async function executeQueuedAction(item) {
   } else if (action === 'encerrarDia') {
     await trpcMutation('campo.visitaComercial.encerrarDia', payload);
   }
+}
+
+// Envio REST da fila: só considera enviado se o servidor confirmou (HTTP ok).
+// Qualquer falha lança erro => o item continua na fila e é tentado de novo depois.
+async function postRestQueued(endpoint, payload) {
+  const token = S.authToken;
+  const headers = {'Content-Type':'application/json', ...(token ? {'Authorization': `Bearer ${token}`} : {})};
+  const body = token ? {...payload, _authToken: token} : payload;
+  const res = await fetch(endpoint, {method:'POST', credentials:'include', headers, body: JSON.stringify(body)});
+  let j = {};
+  try { j = await res.json(); } catch(e) {}
+  if (!res.ok) throw new Error(j?.error || `Erro ${res.status}`);
+  return j;
+}
+function isNetErr(e) {
+  return e instanceof TypeError || /failed to fetch|networkerror|load failed|network request failed|sem resposta|timeout|abort/i.test(String(e && e.message));
 }
 
 // ── TRPC CLIENT ───────────────────────────────────────────────
@@ -488,7 +560,11 @@ async function checkAuth() {
 // ── OFFLINE DETECTION ─────────────────────────────────────────
 function updateOfflineUI() {
   const bar = document.getElementById('offline-bar');
-  if (bar) bar.classList.toggle('show', !S.isOnline);
+  if (bar) {
+    bar.classList.toggle('show', !S.isOnline);
+    const n = S.syncQueue.length;
+    bar.textContent = '⚡ SEM CONEXÃO — dados salvos no aparelho' + (n ? ` • ${n} pendente${n>1?'s':''} de envio` : '');
+  }
   // Queue dot on home nav
   const dot = document.querySelector('.nav-dot');
   if (dot) dot.classList.toggle('show', S.syncQueue.length > 0);
@@ -515,6 +591,8 @@ window.addEventListener('offline', () => {
 const app = document.getElementById('app');
 
 function render() {
+  // Antes de redesenhar, guarda o que está digitado/assinado no formulário (nada se perde)
+  if (S.showNovoRelatorio && document.getElementById('rel-obs')) { try { coletarDoDom(); } catch(e){} }
   app.innerHTML = '';
   if (!S.user) { app.appendChild(renderLogin()); return; }
   if (S.selectedOrdemId) { app.appendChild(renderOrdemDetail()); return; }
@@ -572,7 +650,9 @@ function div(cls='', tag='div') {
   return el;
 }
 
-function today() { return new Date().toISOString().split('T')[0]; }
+// Data de hoje no fuso LOCAL do aparelho (toISOString usa UTC e virava "amanhã" depois das 21h)
+function today() { const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function osData(o) { return String(o&&o.dataAgendada||'').slice(0,10); }
 function fmtDate(d) { if(!d) return '—'; try{return new Date(d+'T12:00:00').toLocaleDateString('pt-BR')}catch{return d} }
 function fmtDT(d) { if(!d) return '—'; try{const dt=new Date(d);return dt.toLocaleDateString('pt-BR')+' '+dt.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}catch{return d} }
 
@@ -629,8 +709,17 @@ function renderLogin() {
 // ── HOME ──────────────────────────────────────────────────────
 function renderHome() {
   const el = div('pad sp5');
-  const hoje = S.ordens.filter(o=>o.dataAgendada===today());
+  const hojeStr = today();
+  const pend = S.ordens.filter(o=>o.status==='agendada'||o.status==='pendente_peca');
   const emAnd = S.ordens.filter(o=>o.status==='em_andamento');
+  const hoje = pend.filter(o=>osData(o)===hojeStr);
+  const atrasadas = pend.filter(o=>osData(o)&&osData(o)<hojeStr);
+  const proximas = pend.filter(o=>osData(o)>hojeStr).sort((a,b)=>osData(a).localeCompare(osData(b))).slice(0,10);
+  const semData = pend.filter(o=>!osData(o));
+  const secOS = (titulo, lista, extra)=>lista.length?`<div>
+      <div class="sec-ttl">${titulo}</div>
+      <div class="sp3">${lista.map(o=>osCardHTML(o, extra)).join('')}</div>
+    </div>`:'';
   const qLen = S.syncQueue.length;
 
   el.innerHTML = `
@@ -647,6 +736,8 @@ function renderHome() {
       <button class="btn btn-sm" style="width:auto;padding:0 12px;background:var(--yellow);color:#000;height:32px;font-size:12px" onclick="processSyncNow()">Sincronizar</button>
     </div>` : ''}
 
+    ${S.rascunhos.length?`<button class="btn btn-gh" id="home-rasc" style="width:100%;height:44px;font-size:13px;border-color:var(--orange);color:var(--orange)">${S.rascunhos.length} relatório(s) salvo(s) aguardando assinatura/envio — abrir</button>`:''}
+
     <div class="stats-g">
       <div class="stat">
         <div class="stat-ico ico-blue">${IC.cal}</div>
@@ -660,15 +751,13 @@ function renderHome() {
       </div>
     </div>
 
-    ${hoje.length?`<div>
-      <div class="sec-ttl">${IC.cal} Agenda de Hoje</div>
-      <div class="sp3">${hoje.map(osCardHTML).join('')}</div>
-    </div>`:''}
-
-    ${emAnd.length?`<div>
-      <div class="sec-ttl">${IC.timer} Em Andamento</div>
-      <div class="sp3">${emAnd.map(osCardHTML).join('')}</div>
-    </div>`:''}
+    ${secOS(IC.timer+' Em Andamento', emAnd)}
+    ${secOS(IC.cal+' Agenda de Hoje', hoje)}
+    ${secOS(IC.warn+' Atrasadas', atrasadas, true)}
+    ${secOS(IC.cal+' Próximos atendimentos', proximas, true)}
+    ${secOS('Sem data definida', semData)}
+    ${(!emAnd.length&&!hoje.length&&!atrasadas.length&&!proximas.length&&!semData.length)?`<div class="empty">${IC.orders}<p>Nenhum atendimento pendente</p></div>`:''}
+    <button class="btn btn-sm" id="home-refresh" style="width:100%;height:40px;font-size:13px">Atualizar atendimentos</button>
 
     <div>
       <div class="sec-ttl">Ações Rápidas</div>
@@ -686,11 +775,14 @@ function renderHome() {
   `;
 
   el.querySelectorAll('.os-card').forEach(c=>c.addEventListener('click',()=>{S.selectedOrdemId=+c.dataset.id;render();}));
+  const hr=el.querySelector('#home-rasc'); if(hr) hr.addEventListener('click',()=>{S.tab='relatorios';render();});
+  const rb=el.querySelector('#home-refresh');
+  if(rb) rb.addEventListener('click',async()=>{rb.disabled=true;rb.textContent='Atualizando...';await loadServerData();render();});
   el.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{S.tab=b.dataset.tab;render();}));
   return el;
 }
 
-function osCardHTML(o) {
+function osCardHTML(o, mostraData) {
   return `<button class="os-card p-${o.prioridade||'baixa'}" data-id="${o.id}">
     <div class="os-num">#${o.numero||o.id}</div>
     <div class="os-cli">${o.clienteNome||'—'}</div>
@@ -699,7 +791,7 @@ function osCardHTML(o) {
       ${o.equipamentoModelo?`<span style="font-size:11px;color:var(--text-3)">${o.equipamentoModelo}</span>`:''}
     </div>
     ${o.endereco?`<div class="os-addr">${IC.pin} ${o.endereco}</div>`:''}
-    ${o.horaAgendada?`<div style="font-size:11px;color:var(--text-3);margin-top:4px;display:flex;align-items:center;gap:3px">${IC.clock} ${o.horaAgendada}</div>`:''}
+    ${(o.horaAgendada||(mostraData&&osData(o)))?`<div style="font-size:11px;color:var(--text-3);margin-top:4px;display:flex;align-items:center;gap:3px">${IC.clock} ${mostraData&&osData(o)?fmtDate(osData(o))+' ':''}${o.horaAgendada||''}</div>`:''}
     <div class="os-right">
       <span class="badge ${STATUS_BADGE[o.status]||'b-gray'}">${STATUS_LBL[o.status]||o.status}</span>
       ${o.prioridade==='urgente'?'<span class="badge b-red">URGENTE</span>':''}
@@ -779,10 +871,15 @@ function renderOrdemDetail() {
 
   content.querySelector('#btn-iniciar')?.addEventListener('click', async () => {
     try {
+      let ok = false;
       if(S.isOnline) {
-        await trpcMutation('campo.mobile.iniciarOrdem', {id:ordem.id});
-        await loadServerData();
-      } else {
+        try {
+          await trpcMutation('campo.mobile.iniciarOrdem', {id:ordem.id});
+          await loadServerData();
+          ok = true;
+        } catch(e) { if(!isNetErr(e)) throw e; S.isOnline=false; updateOfflineUI(); }
+      }
+      if(!ok) {
         await queueAction('iniciarOrdem', {id:ordem.id});
         const o = S.ordens.find(x=>x.id===ordem.id);
         if(o) o.status='em_andamento';
@@ -793,6 +890,9 @@ function renderOrdemDetail() {
   });
 
   content.querySelector('#btn-rel')?.addEventListener('click',()=>{
+    // Se já existe um relatório salvo (para assinar depois) dessa OS, retoma ele
+    const existente = S.rascunhos.find(d => d.activeRelatorioOsId === ordem.id);
+    if (existente) { restaurarRascunho(existente); S.selectedOrdemId = null; render(); return; }
     S.activeRelatorioOsId = ordem.id;
     S.showNovoRelatorio = true;
     S.relatorioStep = 1;
@@ -813,6 +913,18 @@ function renderRelatorios() {
   el.innerHTML=`
     <button class="btn btn-gr" id="btn-novo-rel">${IC.plus} Novo Relatório</button>
     ${!S.isOnline?`<div style="font-size:12px;color:var(--yellow);text-align:center;padding:8px">${IC.warn} Exibindo cache local</div>`:''}
+    ${S.rascunhos.length?`<div>
+      <div class="sec-ttl">Salvos para assinar / enviar (${S.rascunhos.length})</div>
+      <div class="sp3">${S.rascunhos.map(d=>`
+        <div class="card"><div class="card-b">
+          <p style="font-size:14px;font-weight:700">${d.titulo||'Relatório'}</p>
+          <p style="font-size:11px;color:var(--text-3);margin-bottom:8px">Salvo em ${fmtDT(d.savedAt)} · ${d.relSigCli?'cliente assinou':'sem assinatura do cliente'} · ${d.relSigTec?'técnico assinou':'sem assinatura do técnico'}</p>
+          <div class="flex" style="gap:8px">
+            <button class="btn btn-gr btn-sm" style="flex:1" data-cont="${d.id}">Continuar</button>
+            <button class="btn btn-gh btn-sm" style="width:auto;padding:0 14px" data-exc="${d.id}">Excluir</button>
+          </div>
+        </div></div>`).join('')}</div>
+    </div>`:''}
     ${!S.relatorios.length?`<div class="empty">${IC.reports}<p>Nenhum relatório<br><span style="font-size:11px">Toque em "Novo Relatório"</span></p></div>`:
     S.relatorios.map(r=>`
       <div class="card">
@@ -829,6 +941,14 @@ function renderRelatorios() {
         </div>
       </div>`).join('')}
   `;
+  el.querySelectorAll('[data-cont]').forEach(b=>b.addEventListener('click',()=>{
+    const d=S.rascunhos.find(x=>x.id===b.dataset.cont); if(!d) return;
+    restaurarRascunho(d); render();
+  }));
+  el.querySelectorAll('[data-exc]').forEach(b=>b.addEventListener('click',async()=>{
+    if(!confirm('Excluir este relatório salvo? Não dá para desfazer.')) return;
+    await limparRascunhoSalvo(b.dataset.exc); render();
+  }));
   el.querySelector('#btn-novo-rel').addEventListener('click',()=>{
     S.activeRelatorioOsId=null;
     S.showNovoRelatorio=true;
@@ -848,6 +968,8 @@ function resetRelForm() {
   S.relDados={};
   S.relSigCli='';
   S.relSigTec='';
+  S.relObs=''; S.relNomeCli=''; S.relNomeTec=''; S.relClienteNome=''; S.relTipoServico='';
+  S.rascunhoId=null;
 }
 
 function renderNovoRelatorio() {
@@ -857,9 +979,11 @@ function renderNovoRelatorio() {
   const ordem = S.activeRelatorioOsId ? S.ordens.find(o=>o.id===S.activeRelatorioOsId) : null;
 
   const hdr = div('hdr');
-  const goBack = () => {
+  const goBack = async () => {
+    // Nunca perde o que foi preenchido: guarda como rascunho antes de sair
+    await salvarRascunhoAgora();
     if(!S.activeRelatorioOsId && S.relatorioStep>1){
-      S.relatorioStep=1; S.relatorioTemplateId=null; render();
+      S.relatorioStep=1; S.relatorioTemplateId=null; resetRelForm(); render();
     } else {
       S.showNovoRelatorio=false; S.activeRelatorioOsId=null; resetRelForm(); render();
     }
@@ -924,12 +1048,14 @@ function buildRelForm(template, ordem, onBack) {
     const g = div('fg'); g.style.marginBottom = '12px';
     g.innerHTML = `<label class="lbl">Cliente / Local *</label>
       <input id="rel-cli" class="inp" placeholder="Nome do cliente ou local">`;
+    g.querySelector('#rel-cli').value = S.relClienteNome || '';
     frag.appendChild(g);
     const g2 = div('fg'); g2.style.marginBottom = '18px';
     g2.innerHTML = `<label class="lbl">Tipo de Serviço</label>
       <select id="rel-tipo" class="sel">
         ${Object.entries(TIPO_LBL).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
       </select>`;
+    if (S.relTipoServico) g2.querySelector('#rel-tipo').value = S.relTipoServico;
     frag.appendChild(g2);
   }
 
@@ -1024,7 +1150,7 @@ function buildRelForm(template, ordem, onBack) {
             ${IC.camera} <span style="font-size:14px;color:var(--text-2)">Tirar foto</span>
             <input type="file" accept="image/*" capture="environment" style="display:none" id="${fid2}">
           </label>
-          <div id="${fid2}p"></div>
+          <div id="${fid2}p">${(typeof S.relDados[campo.id]==='string'&&S.relDados[campo.id].startsWith('data:'))?`<img src="${S.relDados[campo.id]}" style="width:100%;border-radius:var(--rs);margin-top:6px;max-height:200px;object-fit:cover">`:''}</div>
         </div>`;
         w.querySelector('input').addEventListener('change', async e => {
           const file = e.target.files[0]; if (!file) return;
@@ -1078,6 +1204,7 @@ function buildRelForm(template, ordem, onBack) {
   const obsSec = div('fg'); obsSec.style.marginTop = '18px';
   obsSec.innerHTML = `<label class="lbl">Observações Gerais</label>
     <textarea id="rel-obs" class="txta" placeholder="Observações adicionais..."></textarea>`;
+  obsSec.querySelector('#rel-obs').value = S.relObs || '';
   frag.appendChild(obsSec);
 
   // ── 7. ASSINATURAS — sempre no final, sempre 2: Cliente + Técnico ──
@@ -1090,6 +1217,20 @@ function buildRelForm(template, ordem, onBack) {
   submitBtn.innerHTML = `${IC.send} Enviar Relatório`;
   submitBtn.addEventListener('click', () => submitRelatorio(template, ordem, onBack));
   frag.appendChild(submitBtn);
+
+  // Salvar para assinar/enviar depois — guarda TUDO e volta quando o técnico abrir de novo
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'btn btn-gh';
+  saveBtn.style.cssText = 'margin-top:-16px;margin-bottom:32px';
+  saveBtn.textContent = 'Salvar para assinar depois';
+  saveBtn.addEventListener('click', async () => {
+    await salvarRascunhoAgora();
+    if (!S.rascunhoId) { alert('Preencha alguma informação antes de salvar.'); return; }
+    S.showNovoRelatorio=false; S.activeRelatorioOsId=null; S.selectedOrdemId=null;
+    resetRelForm(); S.tab='relatorios'; render();
+    showSuccess('Relatório salvo','Abra em Relatórios > Continuar para assinar e enviar.');
+  });
+  frag.appendChild(saveBtn);
 
   return frag;
 }
@@ -1151,7 +1292,7 @@ function buildFotos() {
     S.relFotos.forEach((f,i)=>{
       const t=div('photo-t');
       t.innerHTML=`<img src="${f}"><button class="photo-del" data-di="${i}">${IC.trash}</button>`;
-      t.querySelector('[data-di]').addEventListener('click',e=>{const idx=+e.currentTarget.dataset.di;S.relFotos.splice(idx,1);rebuildGrid();});
+      t.querySelector('[data-di]').addEventListener('click',e=>{const idx=+e.currentTarget.dataset.di;S.relFotos.splice(idx,1);rebuildGrid();agendarSalvarRascunho();});
       grid.appendChild(t);
     });
     grid.appendChild(addBtn);
@@ -1161,6 +1302,7 @@ function buildFotos() {
     <div class="photos-g" id="pg">
       <label class="photo-add">${IC.camera}<span>Adicionar</span><input type="file" accept="image/*" capture="environment" multiple class="hidden"></label>
     </div>`;
+  rebuildGrid(); // mostra as fotos que já estavam no relatório (ao reabrir um rascunho)
   wrap.querySelector('input[type=file]').addEventListener('change',async e=>{
     const arquivos = Array.from(e.target.files||[]);
     for (const f of arquivos) {
@@ -1210,41 +1352,97 @@ function buildAssinaturas() {
     </div>`;
 
   setTimeout(() => {
-    initSig('sig-cli', 'cli');
-    initSig('sig-tec', 'tec');
+    initSig('sig-cli', 'cli', S.relSigCli);
+    initSig('sig-tec', 'tec', S.relSigTec);
     wrap.querySelector('#clr-cli').addEventListener('click', () => clearSig('sig-cli','cli'));
     wrap.querySelector('#clr-tec').addEventListener('click', () => clearSig('sig-tec','tec'));
     // Store names in relDados for payload
     const nomeCliEl = wrap.querySelector('#sig-cli-nome');
     const nomeTecEl = wrap.querySelector('#sig-tec-nome');
-    if (nomeCliEl) nomeCliEl.addEventListener('input', e => { S.relDados['_nomeCli'] = e.target.value; });
-    if (nomeTecEl) nomeTecEl.addEventListener('input', e => { S.relDados['_nomeTec'] = e.target.value; });
+    if (nomeCliEl) { if (S.relNomeCli) nomeCliEl.value = S.relNomeCli; nomeCliEl.addEventListener('input', e => { S.relNomeCli = e.target.value; S.relDados['_nomeCli'] = e.target.value; }); }
+    if (nomeTecEl) { if (S.relNomeTec) nomeTecEl.value = S.relNomeTec; nomeTecEl.addEventListener('input', e => { S.relNomeTec = e.target.value; S.relDados['_nomeTec'] = e.target.value; }); }
   }, 80);
   return wrap;
 }
 
-function initSig(id, type) {
-  const canvas=document.getElementById(id); if(!canvas) return;
-  const ctx=canvas.getContext('2d');
-  canvas.width=canvas.offsetWidth*devicePixelRatio||320;
-  canvas.height=120*devicePixelRatio;
-  ctx.scale(devicePixelRatio,devicePixelRatio);
-  let drawing=false;
-  const pos=e=>{const r=canvas.getBoundingClientRect();const src=e.touches?e.touches[0]:e;return{x:src.clientX-r.left,y:src.clientY-r.top}};
-  const start=e=>{e.preventDefault();drawing=true;const p=pos(e);ctx.beginPath();ctx.moveTo(p.x,p.y)};
-  const move=e=>{if(!drawing)return;e.preventDefault();const p=pos(e);ctx.lineTo(p.x,p.y);ctx.strokeStyle='#f0f4ff';ctx.lineWidth=2;ctx.lineCap='round';ctx.lineJoin='round';ctx.stroke()};
-  const end=()=>{drawing=false;if(type==='cli')S.relSigCli=canvas.toDataURL();else S.relSigTec=canvas.toDataURL()};
-  canvas.addEventListener('touchstart',start,{passive:false});
-  canvas.addEventListener('touchmove',move,{passive:false});
-  canvas.addEventListener('touchend',end,{passive:false});
-  canvas.addEventListener('mousedown',start);
-  canvas.addEventListener('mousemove',move);
-  canvas.addEventListener('mouseup',end);
-  canvas.addEventListener('mouseleave',end);
-  // iOS pointer events fallback
-  canvas.addEventListener('pointerdown',start,{passive:false});
-  canvas.addEventListener('pointermove',move,{passive:false});
-  canvas.addEventListener('pointerup',end);
+// ── ASSINATURA: traço livre, pode tirar o dedo e continuar ───────────────
+// Fundo branco + traço escuro (o PDF é branco: traço claro ficava invisível).
+// Usa Pointer Events (um único caminho, sem duplicar touch+mouse) e captura o
+// ponteiro, então levantar o dedo só encerra aquele traço — o próximo toque
+// continua a mesma assinatura.
+const SIG_COR = '#111827';
+function sigEmBranco(canvas) {
+  try {
+    const d = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    for (let i = 3; i < d.length; i += 16) if (d[i] > 0) return false; // alpha > 0 em algum pixel
+    return true;
+  } catch(e) { return false; }
+}
+// Exporta PNG pequeno (600px de largura, fundo transparente, traço escuro). '' se estiver em branco.
+function exportSig(canvas, largura = 600) {
+  if (!canvas || sigEmBranco(canvas)) return '';
+  const off = document.createElement('canvas');
+  off.width = largura;
+  off.height = Math.max(1, Math.round(largura * canvas.height / canvas.width));
+  const c = off.getContext('2d');
+  c.drawImage(canvas, 0, 0, off.width, off.height);
+  let out = off.toDataURL('image/png');
+  if (out.length > 45000 && largura > 300) return exportSig(canvas, Math.round(largura * 0.7)); // cabe no limite do servidor
+  return out;
+}
+function initSig(id, type, inicial) {
+  const canvas = document.getElementById(id); if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.offsetWidth || 320, h = canvas.offsetHeight || 120;
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.strokeStyle = SIG_COR; ctx.fillStyle = SIG_COR;
+  ctx.lineWidth = 2.4; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  // Restaura assinatura já feita (rascunho salvo)
+  if (inicial) {
+    const im = new Image();
+    im.onload = () => { try { ctx.drawImage(im, 0, 0, w, h); } catch(e){} };
+    im.src = inicial;
+  }
+  let drawing = false, pid = null, last = null;
+  const pos = e => { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+  const salvar = () => {
+    const d = exportSig(canvas);
+    if (type === 'cli') S.relSigCli = d; else S.relSigTec = d;
+    agendarSalvarRascunho();
+  };
+  const down = e => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    e.preventDefault();
+    drawing = true; pid = e.pointerId; last = pos(e);
+    try { canvas.setPointerCapture(pid); } catch(_) {}
+    ctx.beginPath(); ctx.arc(last.x, last.y, 1.2, 0, Math.PI * 2); ctx.fill(); // ponto (toque simples)
+    ctx.beginPath(); ctx.moveTo(last.x, last.y);
+  };
+  const move = e => {
+    if (!drawing || e.pointerId !== pid) return;
+    e.preventDefault();
+    const evs = (e.getCoalescedEvents && e.getCoalescedEvents().length) ? e.getCoalescedEvents() : [e];
+    for (const ev of evs) {
+      const p = pos(ev);
+      ctx.beginPath(); ctx.moveTo(last.x, last.y); ctx.lineTo(p.x, p.y); ctx.stroke();
+      last = p;
+    }
+  };
+  const up = e => {
+    if (!drawing || (e.pointerId !== undefined && pid !== null && e.pointerId !== pid)) return;
+    drawing = false;
+    try { canvas.releasePointerCapture(pid); } catch(_) {}
+    pid = null; salvar();
+  };
+  canvas.style.touchAction = 'none';
+  canvas.addEventListener('pointerdown', down);
+  canvas.addEventListener('pointermove', move);
+  canvas.addEventListener('pointerup', up);
+  canvas.addEventListener('pointercancel', up);
+  canvas.addEventListener('lostpointercapture', up);
 }
 
 function initSigPad(id, onChange) {
@@ -1272,8 +1470,9 @@ function initSigPad(id, onChange) {
 
 function clearSig(id,type) {
   const canvas=document.getElementById(id);if(!canvas)return;
-  canvas.getContext('2d').clearRect(0,0,canvas.width,canvas.height);
+  const c=canvas.getContext('2d');c.save();c.setTransform(1,0,0,1,0,0);c.clearRect(0,0,canvas.width,canvas.height);c.restore();
   if(type==='cli')S.relSigCli='';else S.relSigTec='';
+  agendarSalvarRascunho();
 }
 
 function captureGPS(fieldId) {
@@ -1287,6 +1486,8 @@ function captureGPS(fieldId) {
 
 // ── SUBMIT RELATÓRIO ──────────────────────────────────────────
 async function submitRelatorio(template, ordem, onBack) {
+  coletarDoDom();
+  const rascunhoDoEnvio = S.rascunhoId;
   const clienteNome = ordem
     ? (ordem.clienteNome||'').trim()
     : (document.getElementById('rel-cli')?.value||'').trim();
@@ -1331,8 +1532,8 @@ async function submitRelatorio(template, ordem, onBack) {
 
   const sigCliCanvas = document.getElementById('sig-cli');
   const sigTecCanvas = document.getElementById('sig-tec');
-  const sigCli = (sigCliCanvas && sigCliCanvas.tagName==='CANVAS') ? sigCliCanvas.toDataURL('image/png') : null;
-  const sigTec = (sigTecCanvas && sigTecCanvas.tagName==='CANVAS') ? sigTecCanvas.toDataURL('image/png') : null;
+  const sigCli = (sigCliCanvas && sigCliCanvas.tagName==='CANVAS') ? (exportSig(sigCliCanvas) || S.relSigCli || null) : (S.relSigCli || null);
+  const sigTec = (sigTecCanvas && sigTecCanvas.tagName==='CANVAS') ? (exportSig(sigTecCanvas) || S.relSigTec || null) : (S.relSigTec || null);
   const svsOk = S.relServicos.filter(s=>s.descricao?.trim());
   const pcsOk = S.relPecas.filter(p=>p.nome?.trim());
 
@@ -1370,8 +1571,8 @@ async function submitRelatorio(template, ordem, onBack) {
   if(fotosValidas.length) payload.fotos = fotosValidas;
 
   // Assinaturas — só inclui se canvas foi desenhado (>500 chars) e não é enorme
-  if(sigCli && sigCli.length > 500 && sigCli.length < 50000) payload.assinaturaCliente = sigCli;
-  if(sigTec && sigTec.length > 500 && sigTec.length < 50000) payload.assinaturaTecnico = sigTec;
+  if(sigCli && sigCli.length < 60000) payload.assinaturaCliente = sigCli;
+  if(sigTec && sigTec.length < 60000) payload.assinaturaTecnico = sigTec;
 
   // Log payload para debug (sem base64)
   console.log('[submitRelatorio] payload enviado:', JSON.stringify({
@@ -1393,14 +1594,23 @@ async function submitRelatorio(template, ordem, onBack) {
       const authHeaders = S.authToken ? {'Authorization': `Bearer ${S.authToken}`} : {};
       // Also pass token in body as fallback for environments where headers are stripped
       const bodyWithToken = S.authToken ? {...payloadClean, _authToken: S.authToken} : payloadClean;
-      const restRes = await fetch(endpoint, {
-        method: 'POST',
-        credentials: 'include',
-        headers: {'Content-Type': 'application/json', ...authHeaders},
-        body: JSON.stringify(bodyWithToken),
-      });
-      const restJson = await restRes.json().catch(() => ({}));
-      if (!restRes.ok) {
+      let restRes, restJson;
+      try {
+        restRes = await fetch(endpoint, {
+          method: 'POST',
+          credentials: 'include',
+          headers: {'Content-Type': 'application/json', ...authHeaders},
+          body: JSON.stringify(bodyWithToken),
+        });
+        restJson = await restRes.json().catch(() => ({}));
+      } catch (netErr) {
+        // Sinal caiu/fraco na hora de enviar: guarda na fila e envia sozinho quando voltar
+        if (!isNetErr(netErr)) throw netErr;
+        S.isOnline = false; updateOfflineUI();
+        await queueAction(ordem?'submitRelatorio':'submitRelatorioDireto', payloadClean);
+        restRes = null;
+      }
+      if (restRes && !restRes.ok) {
         if (restRes.status === 401) {
           // Token expirado ou ausente — limpa sessão e força login
           S.authToken = null; S.user = null;
@@ -1414,11 +1624,12 @@ async function submitRelatorio(template, ordem, onBack) {
     } else {
       await queueAction(ordem?'submitRelatorio':'submitRelatorioDireto', payloadClean);
     }
+    const foiParaFila = !S.isOnline;
     if(ordem){const o=S.ordens.find(x=>x.id===ordem.id);if(o)o.status='concluida';}
     S.showNovoRelatorio=false;S.activeRelatorioOsId=null;S.selectedOrdemId=null;
     S.tab='relatorios';
     resetRelForm();
-    await limparRascunhoSalvo(); // enviado (ou na fila offline) — não precisa mais do rascunho
+    await limparRascunhoSalvo(rascunhoDoEnvio); // enviado (ou na fila offline) — não precisa mais do rascunho
     // Force reload from server to show new report
     if(S.isOnline) {
       await loadServerData();
@@ -1426,7 +1637,7 @@ async function submitRelatorio(template, ordem, onBack) {
       await saveCache('ordens',S.ordens);
     }
     render();
-    showSuccess('Relatório enviado!','Dados salvos no CRM.');
+    if(foiParaFila) showSuccess('Salvo no aparelho!','Sem sinal: envio automático quando a internet voltar.'); else showSuccess('Relatório enviado!','Dados salvos no CRM.');
   } catch(e) {
     if(btn){btn.disabled=false;btn.innerHTML=`${IC.send} Enviar Relatório`;}
     alert('Erro ao enviar: '+e.message);
@@ -1463,6 +1674,13 @@ window.addEventListener('unhandledrejection', (e) => {
 // momentos comuns de o iOS matar a aba por pouca memória, sem aviso nenhum.
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden' && S.showNovoRelatorio) salvarRascunhoAgora();
+  // Ao voltar para o app, busca os atendimentos novos (sem precisar fechar e abrir)
+  if (document.visibilityState === 'visible' && S.syncQueue.length && navigator.onLine && !S.isSyncing) {
+    S.isOnline = true; updateOfflineUI(); processQueue();
+  }
+  if (document.visibilityState === 'visible' && S.user && S.isOnline && !S.showNovoRelatorio) {
+    loadServerData().then(()=>{ if (!S.showNovoRelatorio) render(); }).catch(()=>{});
+  }
 });
 window.addEventListener('pagehide', () => {
   if (S.showNovoRelatorio) salvarRascunhoAgora();
@@ -1483,23 +1701,8 @@ async function boot() {
 
   render();
 
-  // Se sobrou um rascunho de relatório não enviado (app travou, fechou
-  // sozinho etc.), oferece continuar de onde parou em vez de simplesmente
-  // sumir com o que já tinha sido preenchido.
-  if (S.user) {
-    const draft = await carregarRascunhoSalvo();
-    if (draft && draft.savedAt) {
-      const minsAtras = Math.round((Date.now() - draft.savedAt) / 60000);
-      const quando = minsAtras < 1 ? 'agora há pouco' : minsAtras < 60 ? `há ${minsAtras} min` : `em ${new Date(draft.savedAt).toLocaleString('pt-BR')}`;
-      const continuar = confirm(`Encontramos um relatório que você estava preenchendo e não chegou a enviar (salvo ${quando}). Quer continuar de onde parou?`);
-      if (continuar) {
-        restaurarRascunho(draft);
-        render();
-      } else {
-        await limparRascunhoSalvo();
-      }
-    }
-  }
+  // Rascunhos (relatórios salvos para assinar/enviar depois) ficam na aba Relatórios
+  if (S.user) { await carregarRascunhos(); render(); }
 
   // Load fresh data in background
   if(S.user && S.isOnline) {
@@ -1507,10 +1710,22 @@ async function boot() {
     processQueue();
   }
 
-  // Service Worker — desabilitado para evitar cache problems
+  // Service Worker: deixa o app abrir sem internet (rede primeiro, cópia local se faltar sinal)
   if('serviceWorker' in navigator) {
-    navigator.serviceWorker.getRegistrations().then(r=>r.forEach(s=>s.unregister()));
+    navigator.serviceWorker.register('sw.js').then(reg => {
+      reg.update().catch(()=>{});
+    }).catch(e => console.warn('SW não registrou:', e));
   }
+  // Pede ao navegador para NÃO apagar os dados locais (relatórios/fotos pendentes) em falta de espaço
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch(e) {}
+
+  // Reenvio automático: a cada 30s e ao voltar pro app, se houver algo na fila
+  setInterval(async () => {
+    if (S.syncQueue.length && navigator.onLine && !S.isSyncing) {
+      S.isOnline = true; updateOfflineUI();
+      await processQueue();
+    }
+  }, 30000);
 }
 
 window.processSyncNow = processSyncNow;
