@@ -160,13 +160,18 @@ async function saveCache(key, value) {
 async function loadCache(key) {
   let val = await dbGet('cache', key);
   // Fallback to localStorage if IndexedDB lost data (iOS reinstall)
-  if ((val === undefined || val === null) && (key === 'authToken' || key === 'user')) {
+  if ((val === undefined || val === null) && (key === 'authToken' || key === 'user' || key === DRAFT_CACHE_KEY)) {
     try {
       const ls = localStorage.getItem('bgcampo_'+key);
       if (ls) { val = JSON.parse(ls); await dbPut('cache', key, val); }
     } catch(e) {}
   }
   return val;
+}
+
+// Escapa texto para colocar dentro de value="..." / <textarea> (aspas e < > não quebram mais o que foi digitado)
+function escH(v) {
+  return String(v ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 // ── FOTOS: compressão + tratamento de erro ──────────────────────────────────
@@ -268,7 +273,19 @@ async function salvarRascunhoAgora() {
     const i = S.rascunhos.findIndex(d => d.id === draft.id);
     if (i >= 0) S.rascunhos[i] = draft; else S.rascunhos.unshift(draft);
     await saveCache(DRAFT_CACHE_KEY, S.rascunhos);
-  } catch(e) { console.warn('rascunho: não consegui salvar', e); }
+    // Confere se gravou de verdade (lê de volta). Se falhar, tenta uma cópia no localStorage.
+    let ok = false;
+    try { const lido = await loadCache(DRAFT_CACHE_KEY); ok = Array.isArray(lido) && lido.some(d => d.id === draft.id && d.savedAt === draft.savedAt); } catch(_) {}
+    if (!ok) {
+      try { localStorage.setItem('bgcampo_' + DRAFT_CACHE_KEY, JSON.stringify(S.rascunhos)); ok = true; } catch(_) {}
+    }
+    S._rascunhoOk = ok;
+    return ok;
+  } catch(e) {
+    console.warn('rascunho: não consegui salvar', e);
+    S._rascunhoOk = false;
+    return false;
+  }
 }
 async function carregarRascunhos() {
   try {
@@ -847,7 +864,7 @@ function renderOrdemDetail() {
 
   let actionBtn='';
   if(ordem.status==='agendada') actionBtn=`<button class="btn btn-or" id="btn-iniciar">${IC.wrench} Iniciar Atendimento</button>`;
-  else if(ordem.status==='em_andamento') actionBtn=`<button class="btn btn-gr" id="btn-rel">${IC.pen} Preencher Relatório</button>`;
+  else if(ordem.status==='em_andamento') actionBtn=`<button class="btn btn-gr" id="btn-rel">${IC.pen} ${S.rascunhos.some(d=>d.activeRelatorioOsId===ordem.id)?'Continuar relatório salvo':'Preencher Relatório'}</button>`;
   else if(ordem.status==='concluida') actionBtn=`<div style="background:var(--green-dim);border:1px solid rgba(46,201,124,.2);border-radius:var(--r);padding:20px;text-align:center;color:var(--green)">${IC.checkCircle}<br><br><strong>OS Concluída</strong></div>`;
 
   content.innerHTML=`
@@ -894,6 +911,7 @@ function renderOrdemDetail() {
     const existente = S.rascunhos.find(d => d.activeRelatorioOsId === ordem.id);
     if (existente) { restaurarRascunho(existente); S.selectedOrdemId = null; render(); return; }
     S.activeRelatorioOsId = ordem.id;
+    S.selectedOrdemId = null; // sai da tela de detalhes da OS (senão o formulário nunca abre)
     S.showNovoRelatorio = true;
     S.relatorioStep = 1;
     S.relatorioTemplateId = null;
@@ -1093,7 +1111,7 @@ function buildRelForm(template, ordem, onBack) {
           <label class="lbl">${campo.label}</label>
           <input class="inp" type="number" inputmode="decimal" pattern="[0-9]*"
             placeholder="${campo.placeholder||'0'}"
-            value="${S.relDados[campo.id]||''}">
+            value="${escH(S.relDados[campo.id])}">
         </div>`;
         w.querySelector('input').addEventListener('input', e => { S.relDados[campo.id] = e.target.value; });
 
@@ -1109,7 +1127,7 @@ function buildRelForm(template, ordem, onBack) {
             ${opts.map(op => `<option value="${op}" ${S.relDados[campo.id]===String(op)?'selected':''}>${op}</option>`).join('')}
           </select>
           <div id="${fid}-extra" style="display:${(S.relDados[campo.id]&&isQualidade&&S.relDados[campo.id]!=='BOM'&&S.relDados[campo.id]!=='N/A')?'flex':'none'};flex-direction:column;gap:6px;margin-top:8px">
-            <input class="inp" id="${fid}-obs" placeholder="Descrever..." value="${S.relDados[campo.id+'_obs']||''}">
+            <input class="inp" id="${fid}-obs" placeholder="Descrever..." value="${escH(S.relDados[campo.id+'_obs'])}">
           </div>
         </div>`;
         const sel = w.querySelector('select');
@@ -1125,7 +1143,7 @@ function buildRelForm(template, ordem, onBack) {
         // Data/hora
         w.innerHTML = `<div class="fg">
           <label class="lbl">${campo.label}</label>
-          <input class="inp" type="datetime-local" value="${S.relDados[campo.id]||''}">
+          <input class="inp" type="datetime-local" value="${escH(S.relDados[campo.id])}">
         </div>`;
         w.querySelector('input').addEventListener('change', e => { S.relDados[campo.id] = e.target.value; });
 
@@ -1170,7 +1188,7 @@ function buildRelForm(template, ordem, onBack) {
         // Texto longo
         w.innerHTML = `<div class="fg">
           <label class="lbl">${campo.label}</label>
-          <textarea class="txta" placeholder="${campo.placeholder||''}">${S.relDados[campo.id]||''}</textarea>
+          <textarea class="txta" placeholder="${campo.placeholder||''}">${escH(S.relDados[campo.id])}</textarea>
         </div>`;
         w.querySelector('textarea').addEventListener('input', e => { S.relDados[campo.id] = e.target.value; });
 
@@ -1178,7 +1196,7 @@ function buildRelForm(template, ordem, onBack) {
         // Texto padrão
         w.innerHTML = `<div class="fg">
           <label class="lbl">${campo.label}</label>
-          <input class="inp" type="text" placeholder="${campo.placeholder||campo.label}" value="${S.relDados[campo.id]||''}">
+          <input class="inp" type="text" placeholder="${campo.placeholder||campo.label}" value="${escH(S.relDados[campo.id])}">
         </div>`;
         w.querySelector('input').addEventListener('input', e => { S.relDados[campo.id] = e.target.value; });
       }
@@ -1224,8 +1242,9 @@ function buildRelForm(template, ordem, onBack) {
   saveBtn.style.cssText = 'margin-top:-16px;margin-bottom:32px';
   saveBtn.textContent = 'Salvar para assinar depois';
   saveBtn.addEventListener('click', async () => {
-    await salvarRascunhoAgora();
+    const gravou = await salvarRascunhoAgora();
     if (!S.rascunhoId) { alert('Preencha alguma informação antes de salvar.'); return; }
+    if (gravou === false) { alert('⚠️ Não consegui salvar no aparelho (pouco espaço ou armazenamento bloqueado). O relatório NÃO foi fechado — libere espaço ou envie agora.'); return; }
     S.showNovoRelatorio=false; S.activeRelatorioOsId=null; S.selectedOrdemId=null;
     resetRelForm(); S.tab='relatorios'; render();
     showSuccess('Relatório salvo','Abra em Relatórios > Continuar para assinar e enviar.');
@@ -1246,7 +1265,7 @@ function rebuildSv(wrap) {
       ${S.relServicos.map((s,i)=>`
         <div class="svc-row">
           <label class="sw"><input type="checkbox" ${s.concluido?'checked':''} data-si="${i}"><span class="sw-track"></span><span class="sw-thumb"></span></label>
-          <input class="inp" value="${s.descricao}" placeholder="Descreva o serviço..." data-sv="${i}">
+          <input class="inp" value="${escH(s.descricao)}" placeholder="Descreva o serviço..." data-sv="${i}">
           <button class="del-btn" data-del-sv="${i}">${IC.trash}</button>
         </div>`).join('')}
     </div>`;
@@ -1266,9 +1285,9 @@ function rebuildPc(wrap) {
     <div class="sp3" id="pc-list">
       ${S.relPecas.map((p,i)=>`
         <div class="peca-row">
-          <input class="inp" value="${p.nome}" placeholder="Nome da peça" data-pn="${i}">
+          <input class="inp" value="${escH(p.nome)}" placeholder="Nome da peça" data-pn="${i}">
           <div class="peca-inps">
-            <input class="inp" value="${p.codigo}" placeholder="Código" data-pc="${i}">
+            <input class="inp" value="${escH(p.codigo)}" placeholder="Código" data-pc="${i}">
             <input class="inp inp-qty" type="number" value="${p.quantidade}" min="1" data-pq="${i}">
             <button class="del-btn" data-del-pc="${i}">${IC.trash}</button>
           </div>

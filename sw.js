@@ -2,7 +2,7 @@
 // Estratégia: rede primeiro (3,5s) para sempre pegar a versão nova quando há sinal;
 // se estiver sem sinal / sinal fraco, abre a cópia guardada. Funciona em qualquer
 // subpasta (usa o escopo do próprio SW), sem caminhos fixos.
-const CACHE = 'bg-campo-v5';
+const CACHE = 'bg-campo-v6';
 const SCOPE = self.registration.scope; // ex.: https://machinebg.github.io/bg-campo-app2/
 const SHELL = ['./', 'index.html', 'manifest.json', 'icon-192.png', 'icon-512.png'];
 const NET_TIMEOUT = 3500;
